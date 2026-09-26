@@ -1,0 +1,101 @@
+<?xml version="1.0" encoding="utf-8"?>
+<manifest xmlns:android="http://schemas.android.com/apk/res/android"
+    xmlns:tools="http://schemas.android.com/tools">
+
+    <!--
+        Shizuku 多进程 binder 共享依赖隐式广播(ShizukuProvider.ACTION_BINDER_RECEIVED)。
+        本应用为单进程且未调用 enableMultiProcessSupport,此项仅为保守保留。
+    -->
+    <uses-permission android:name="android.permission.RECEIVE_BROADCASTS" />
+
+    <!--
+        WRITE_SECURE_SETTINGS:写入 Secure 设置(含无障碍开关)所需。
+        本应用不能自行授予此权限,必须由 ADB / shell 执行 pm grant,
+        而 pm grant 的前提是权限已声明在本 manifest 中。
+        AOSP 会拒绝授予未声明的权限:
+          PermissionManagerService.grantRuntimePermission →
+            "Package X has not requested permission WRITE_SECURE_SETTINGS"
+        本应用此前未声明此项,因此 Shizuku 执行的 pm grant 必然失败,
+        表现为「以为开了权限,应用却检测到未授权」。
+    -->
+    <uses-permission android:name="android.permission.WRITE_SECURE_SETTINGS" />
+
+    <!--
+        getActivityInfo 校验目标应用任意 Activity 需要 packages 查询权限
+        (Android 11+ package visibility):否则对所有未声明可见性的应用抛
+        NameNotFoundException,gkd 的 isActivity 同款校验也会全部失效。
+        参考 gkd-app/AndroidManifest.xml 的做法,直接声明 QUERY_ALL_PACKAGES。
+    -->
+    <uses-permission android:name="android.permission.QUERY_ALL_PACKAGES" />
+
+    <!--
+        SYSTEM_ALERT_WINDOW:系统 Alert 悬浮窗(TYPE_APPLICATION_OVERLAY)所需,
+        由用户在系统设置「显示在其他应用上层」中手动授权。
+    -->
+    <uses-permission android:name="android.permission.SYSTEM_ALERT_WINDOW" />
+
+    <application
+        android:name=".ComposeDemoApplication"
+        android:allowBackup="true"
+        android:icon="@mipmap/ic_launcher"
+        android:roundIcon="@mipmap/ic_launcher_round"
+        android:label="@string/app_name"
+        android:supportsRtl="true"
+        android:theme="@style/Theme.ComposeDemo">
+
+        <!--
+            Shizuku 静态授权入口,配置与官方示例 dev.rikka.shizuku.demo 逐字对齐
+            (见官方仓库 RikkaApps/Shizuku-API 的 demo/src/main/AndroidManifest.xml)。
+            注意:dev.rikka.shizuku:provider 的 AAR manifest 只声明了 application 级
+            meta-data,并不会自动合并 <provider>,这里必须手动声明,否则 Shizuku
+            服务端(adb/shell)无法把 binder 送进来,Shizuku 永远连不上。
+        -->
+        <provider
+            android:name="rikka.shizuku.ShizukuProvider"
+            android:authorities="${applicationId}.shizuku"
+            android:enabled="true"
+            android:exported="true"
+            android:multiprocess="false"
+            android:permission="android.permission.INTERACT_ACROSS_USERS_FULL" />
+
+        <activity
+            android:name=".MainActivity"
+            android:exported="true">
+            <intent-filter>
+                <action android:name="android.intent.action.MAIN" />
+                <category android:name="android.intent.category.LAUNCHER" />
+            </intent-filter>
+        </activity>
+
+        <!--
+            崩溃页:由 CrashReporter 在崩溃时通过 startActivity / AlarmManager 拉起。
+            exported=false,因为它只由本应用进程内部拉起,不需要外部可见;
+            若声明为导出,任意第三方都能伪造崩溃页。
+        -->
+        <activity
+            android:name=".crash.CrashActivity"
+            android:exported="false"
+            android:excludeFromRecents="true"
+            android:launchMode="singleTask"
+            android:theme="@style/Theme.ComposeDemo" />
+
+        <!-- 无障碍服务: manifest 注册 SelectToSpeakService(系统级服务名,绕过部分
+             应用的混淆节点/服务名校验),实际业务逻辑在其父类 DramaAccessibilityService 中 -->
+        <service
+            android:name="com.google.android.accessibility.selecttospeak.SelectToSpeakService"
+            android:enabled="true"
+            android:exported="true"
+            android:label="@string/accessibility_service_label"
+            android:permission="android.permission.BIND_ACCESSIBILITY_SERVICE"
+            tools:ignore="ExportedService">
+            <intent-filter android:priority="10000">
+                <action android:name="android.accessibilityservice.AccessibilityService" />
+            </intent-filter>
+            <meta-data
+                android:name="android.accessibilityservice"
+                android:resource="@xml/accessibility_service_config" />
+        </service>
+
+    </application>
+
+</manifest>

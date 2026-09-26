@@ -1,0 +1,6 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <item name="crash_button_copy" type="id" />
+    <item name="crash_button_restart" type="id" />
+    <item name="crash_button_exit" type="id" />
+</resources>
