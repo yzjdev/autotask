@@ -45,10 +45,10 @@ class TaskRunner(private val service: DramaAccessibilityService) {
             if (!task.enabled || !matches(task, packageName, activityName)) continue
             when (val trigger = task.trigger) {
                 is Task.Trigger.OnPage -> {
-                    if (trigger.once &&
-                        !executed.add("$packageName|$activityName|${task.id}")
-                    ) continue  // 本次进入已执行过
-                    launchTask(task, dedupKey = "$packageName|$activityName|${task.id}")
+                    // 仅 once 任务参与去重;once=false 无需占位
+                    val key = if (trigger.once) "$packageName|$activityName|${task.id}" else null
+                    if (key != null && !executed.add(key)) continue  // 本次进入已执行过
+                    launchTask(task, dedupKey = key)
                 }
                 is Task.Trigger.Loop -> {
                     if (jobs.containsKey(task.id)) continue  // 循环已在跑
@@ -93,16 +93,16 @@ class TaskRunner(private val service: DramaAccessibilityService) {
     /** 启动一个任务的执行协程;循环模式在协程内轮转 */
     private fun launchTask(task: Task, dedupKey: String?) {
         LogStore.log("▶ 触发「${task.stepsSummary()}」@ ${task.packageName}/${task.activityPattern ?: "*"}")
-        scope.launch {
-            val job = coroutineContext[Job]!!
-            jobs[task.id] = job
+        // 同步注册 job:同一回调里下一个窗口事件查 containsKey 不会漏掉在途启动
+        val job = scope.launch {
+            val self = coroutineContext[Job]!!  // 协程内的真实 Job,用于身份判定与循环条件
             try {
                 when (val trigger = task.trigger) {
                     is Task.Trigger.OnPage ->
                         withRetry(task, dedupKey) { runRound(task) }
                     is Task.Trigger.Loop -> {
                         var round = 0
-                        while (isActiveCheck(job) && task.enabled && inForeground(task)) {
+                        while (self.isActive && inForeground(task)) {
                             withRetry(task, dedupKey) { runRound(task) }
                             round++
                             if (trigger.maxRounds in 1..round) {
@@ -116,12 +116,11 @@ class TaskRunner(private val service: DramaAccessibilityService) {
             } catch (e: kotlinx.coroutines.CancellationException) {
                 throw e  // 用户离开/取消:静默退出
             } finally {
-                if (jobs[task.id] === job) jobs.remove(task.id)
+                if (jobs[task.id] === self) jobs.remove(task.id)
             }
         }
+        jobs[task.id] = job
     }
-
-    private fun isActiveCheck(job: Job): Boolean = job.isActive
 
     /** 失败策略包装:整组重试或单次执行 */
     private suspend fun withRetry(
@@ -228,7 +227,6 @@ class TaskRunner(private val service: DramaAccessibilityService) {
     /** Wait 轮询间隔 */
     private companion object {
         const val WAIT_POLL_MS = 200L
-        const val TAG = "TaskRunner"
     }
 
     /** 单定位器查找:TEXT 精确值走系统查询预筛加速,否则 DFS */

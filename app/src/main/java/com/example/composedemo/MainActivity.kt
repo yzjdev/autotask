@@ -996,7 +996,7 @@ private fun StepEditorDialog(
     var timeoutSec by remember {
         mutableStateOf((((initial as? Step.Wait)?.timeoutMs ?: 5000L) / 1000).toString())
     }
-    var delaySec by remember { mutableStateOf(((initial as? Step.Sleep)?.ms ?: 1000L).toString()) }
+    var delaySec by remember { mutableStateOf((((initial as? Step.Sleep)?.ms ?: 1000L) / 1000).toString()) }
     var swipeUp by remember { mutableStateOf((initial as? Step.Swipe)?.up ?: true) }
 
     val needLocator = actionName == "Click" || actionName == "Wait"
@@ -1051,7 +1051,7 @@ private fun StepEditorDialog(
                             NodeLocator.Field.CLASS_NAME to "类名",
                         ).forEach { (f, label) ->
                             OutlinedButton(
-                                onClick = { field = f },
+                                onClick = { field = f; value = ""; contains = false },  // 换字段清残留,避免旧值误存进新字段
                                 colors = if (field == f) ButtonDefaults.outlinedButtonColors(
                                     containerColor = MaterialTheme.colorScheme.primaryContainer
                                 ) else ButtonDefaults.outlinedButtonColors(),

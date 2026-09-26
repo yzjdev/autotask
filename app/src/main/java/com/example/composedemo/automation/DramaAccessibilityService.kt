@@ -163,10 +163,19 @@ open class DramaAccessibilityService : AccessibilityService() {
             !cls.startsWith("android.view") &&
             cls != "android.widget.FrameLayout"
 
-    /** 窗口切换(进入新页面 / 播放页):先驱动规则引擎,再留给子类扩展 */
+    /** 窗口切换(进入新页面 / 播放页):先驱动任务引擎,再留给子类扩展 */
     open fun onWindowChanged(packageName: String, className: String) {
+        // 前台包名变化时通知引擎:离开的目标包清去重、停循环(下次进入重新执行)
+        if (packageName != lastForegroundPkg) {
+            val prev = lastForegroundPkg
+            lastForegroundPkg = packageName
+            if (prev != null) taskRunner.onLeftPackage(prev)
+        }
         taskRunner.onActivityChanged(packageName, className)
     }
+
+    /** 最近一次窗口事件的前台包名(onLeftPackage 检测用) */
+    private var lastForegroundPkg: String? = null
 
     /** 内容变化(列表滚动、按钮状态更新) */
     open fun onContentChanged(packageName: String, className: String) {}
