@@ -64,8 +64,8 @@ open class DramaAccessibilityService : AccessibilityService() {
     // 无障碍调试悬浮窗:由主页开关控制显隐,连接后不自动显示
     private val debugOverlay = OverlayDebugWindow(this)
 
-    /** 规则引擎:窗口切换时匹配规则并执行(如查找文本并点击) */
-    val ruleEngine = RuleEngine(this)
+    /** 任务引擎 v4:窗口切换时匹配任务并执行(协程顺序流) */
+    val taskRunner = TaskRunner(this)
 
     override fun onCreate() {
         super.onCreate()
@@ -76,9 +76,8 @@ open class DramaAccessibilityService : AccessibilityService() {
         sInstance = this
         clearProcessed()
         notifyRunning(true)
-        // 服务连接时加载持久化规则,立即生效
-        ruleEngine.clearRules()
-        RuleStore.loadAll(this).forEach { ruleEngine.addRule(it) }
+        // 服务连接时加载持久化任务,立即生效
+        taskRunner.setTasks(TaskStore.loadAll(this))
     }
 
     /** 调试悬浮球当前是否显示 */
@@ -96,7 +95,7 @@ open class DramaAccessibilityService : AccessibilityService() {
         sInstance = null
         clearProcessed()
         notifyRunning(false)
-        ruleEngine.cancelAll()
+        taskRunner.cancelAll()
         debugOverlay.hide()
         return super.onUnbind(intent)
     }
@@ -105,7 +104,7 @@ open class DramaAccessibilityService : AccessibilityService() {
         sInstance = null
         clearProcessed()
         notifyRunning(false)
-        ruleEngine.cancelAll()
+        taskRunner.cancelAll()
         debugOverlay.hide()
         super.onDestroy()
     }
@@ -166,7 +165,7 @@ open class DramaAccessibilityService : AccessibilityService() {
 
     /** 窗口切换(进入新页面 / 播放页):先驱动规则引擎,再留给子类扩展 */
     open fun onWindowChanged(packageName: String, className: String) {
-        ruleEngine.onActivityChanged(packageName, className)
+        taskRunner.onActivityChanged(packageName, className)
     }
 
     /** 内容变化(列表滚动、按钮状态更新) */
