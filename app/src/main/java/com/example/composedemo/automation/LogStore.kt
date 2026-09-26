@@ -8,7 +8,7 @@ import java.util.Locale
 /**
  * 自动化执行日志:内存环形缓冲,线程安全。
  *
- *  - RuleEngine 在规则触发/成功/失败时调用 [log] 写入
+ *  - TaskRunner 在任务触发/成功/失败时调用 [log] 写入
  *  - 日志页 observe 消费,UI 刷新
  *  - 不落盘:进程被杀即清空,仅用于实时观察
  */
