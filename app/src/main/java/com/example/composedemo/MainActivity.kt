@@ -74,12 +74,14 @@ import androidx.compose.ui.unit.dp
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
 import com.example.composedemo.automation.AutomationManager
-import com.example.composedemo.automation.AutomationRule
 import com.example.composedemo.automation.DramaAccessibilityService
 import com.example.composedemo.automation.LogStore
-import com.example.composedemo.automation.NodeCondition
-import com.example.composedemo.automation.RuleStep
-import com.example.composedemo.automation.RuleStore
+import com.example.composedemo.automation.NodeLocator
+import com.example.composedemo.automation.Step
+import com.example.composedemo.automation.Task
+import com.example.composedemo.automation.TaskStore
+import com.example.composedemo.automation.label
+import com.example.composedemo.automation.stepsSummary
 import com.example.composedemo.automation.SystemAlertWindow
 import com.example.composedemo.ui.theme.ComposeDemoTheme
 
@@ -125,20 +127,17 @@ fun AutomationScreen() {
     }
 
     // ---- 应用 tab 共享数据:提升到顶层,切 tab 不销毁、不重新加载 ----
-    var rules by remember { mutableStateOf(RuleStore.loadAll(context.applicationContext)) }
-    fun persistRules(next: List<AutomationRule>) {
-        rules = next
-        RuleStore.saveAll(context.applicationContext, next)
-        DramaAccessibilityService.instance?.let { svc ->
-            svc.ruleEngine.clearRules()
-            next.forEach { svc.ruleEngine.addRule(it) }
-        }
+    var tasks by remember { mutableStateOf(TaskStore.loadAll(context.applicationContext)) }
+    fun persistTasks(next: List<Task>) {
+        tasks = next
+        TaskStore.saveAll(context.applicationContext, next)
+        DramaAccessibilityService.instance?.taskRunner?.setTasks(next)
     }
     // 已安装应用:后台只加载一次(切回 tab 时 remember 仍在,不重复查询)
-    var installedApps by remember { mutableStateOf<List<RuleStore.AppInfo>?>(null) }
+    var installedApps by remember { mutableStateOf<List<TaskStore.AppInfo>?>(null) }
     LaunchedEffect(Unit) {
         installedApps = withContext(Dispatchers.Default) {
-            RuleStore.loadInstalledApps(context.applicationContext)
+            TaskStore.loadInstalledApps(context.applicationContext)
         }
     }
     // 应用 tab UI 状态:同样提升,切 tab 保留搜索;rememberSaveable 兼顾进程重建
@@ -151,21 +150,21 @@ fun AutomationScreen() {
     BackHandler(enabled = taskPagePkg != null) {
         if (editingRuleId != null) editingRuleId = null else taskPagePkg = null
     }
-    // 包名 → 显示名:优先已装应用标签,规则残留包回退 PackageManager 查询/原包名
-    val labelByPkg = remember(installedApps, rules) {
+    // 包名 → 显示名:优先已装应用标签,任务残留包回退 PackageManager 查询/原包名
+    val labelByPkg = remember(installedApps, tasks) {
         val m = (installedApps ?: emptyList()).associate { it.packageName to it.label }.toMutableMap()
-        rules.forEach { r ->
+        tasks.forEach { r ->
             m.putIfAbsent(r.packageName, appLabel(context, r.packageName, null))
         }
         m
     }
-    // 展示列表 = 全部已装应用 ∪ 有规则的应用,按显示名排序
-    val allApps = remember(installedApps, rules) {
+    // 展示列表 = 全部已装应用 ∪ 有任务的应用,按显示名排序
+    val allApps = remember(installedApps, tasks) {
         val pkgs = linkedSetOf<String>()
         (installedApps ?: emptyList()).forEach { pkgs += it.packageName }
-        rules.forEach { pkgs += it.packageName }
+        tasks.forEach { pkgs += it.packageName }
         pkgs.map { pkg ->
-            Triple(pkg, labelByPkg[pkg] ?: pkg, rules.count { it.packageName == pkg })
+            Triple(pkg, labelByPkg[pkg] ?: pkg, tasks.count { it.packageName == pkg })
         }.sortedBy { it.second.lowercase() }
     }
     // 应用图标缓存:后台逐包加载一次,切 tab 复用(新建 Bitmap + Canvas 绘制不能占主线程)
@@ -228,9 +227,9 @@ fun AutomationScreen() {
                 // 规则编辑页:全屏最顶层
                 RuleEditorPage(
                     pkg = taskPagePkg ?: "",
-                    existing = rules.firstOrNull { it.id == editingRuleId },
-                    onSave = { rule ->
-                        persistRules(rules.filter { it.id != rule.id } + rule)
+                    existing = tasks.firstOrNull { it.id == editingRuleId },
+                    onSave = { task ->
+                        persistTasks(tasks.filter { it.id != task.id } + task)
                         editingRuleId = null
                     },
                     onBack = { editingRuleId = null },
@@ -239,14 +238,14 @@ fun AutomationScreen() {
             } else if (taskPagePkg != null) {
                 TaskListPage(
                     pkg = taskPagePkg!!,
-                    rules = rules,
+                    tasks = tasks,
                     onBack = { taskPagePkg = null },
-                    onEditRule = { editingRuleId = it },
-                    onNewRule = { editingRuleId = "new_${System.currentTimeMillis()}" },
-                    onToggleRule = { id, enabled ->
-                        persistRules(rules.map { if (it.id == id) it.copy(enabled = enabled) else it })
+                    onEditTask = { editingRuleId = it },
+                    onNewTask = { editingRuleId = "new_${System.currentTimeMillis()}" },
+                    onToggleTask = { id, enabled ->
+                        persistTasks(tasks.map { if (it.id == id) it.copy(enabled = enabled) else it })
                     },
-                    onPersistRules = { persistRules(it) },
+                    onPersistTasks = { persistTasks(it) },
                     modifier = Modifier.padding(innerPadding),
                 )
             } else {
@@ -423,8 +422,8 @@ private fun HomeScreen(
     }
 }
 
-/** 包名显示名:用分组内任一规则的 targetText 无关,直接查已装应用标签,查不到回退包名 */
-private fun appLabel(context: android.content.Context, pkg: String, sample: AutomationRule?): String {
+/** 包名显示名:直接查已装应用标签,查不到回退包名 */
+private fun appLabel(context: android.content.Context, pkg: String, sample: Task?): String {
     // 尝试从已装应用解析显示名(缓存成本低,chip 数量有限)
     val pm = context.packageManager
     return runCatching { pm.getApplicationLabel(pm.getApplicationInfo(pkg, 0)).toString() }
@@ -541,16 +540,16 @@ private fun AppsScreen(
     }
 }
 
-/** 独立任务页:单个应用的规则列表(开关/编辑)+ 新建入口;返回栏显示应用名,数据由上层持有 */
+/** 独立任务页:单个应用的任务列表(开关/编辑)+ 新建入口;返回栏显示应用名,数据由上层持有 */
 @Composable
 private fun TaskListPage(
     pkg: String,
-    rules: List<AutomationRule>,
+    tasks: List<Task>,
     onBack: () -> Unit,
-    onEditRule: (String) -> Unit,
-    onNewRule: () -> Unit,
-    onToggleRule: (String, Boolean) -> Unit,
-    onPersistRules: (List<AutomationRule>) -> Unit,
+    onEditTask: (String) -> Unit,
+    onNewTask: () -> Unit,
+    onToggleTask: (String, Boolean) -> Unit,
+    onPersistTasks: (List<Task>) -> Unit,
     modifier: Modifier = Modifier,
 ) {
     val context = LocalContext.current
@@ -561,8 +560,8 @@ private fun TaskListPage(
             ).toString()
         }.getOrDefault(pkg)
     }
-    // 该应用的规则(保持保存顺序)
-    val appRules = rules.filter { it.packageName == pkg }
+    // 该应用的任务(保持保存顺序)
+    val appTasks = tasks.filter { it.packageName == pkg }
 
     Column(modifier = modifier.fillMaxSize()) {
         // 顶栏:返回 + 应用名 + 新建
@@ -589,7 +588,7 @@ private fun TaskListPage(
                     color = MaterialTheme.colorScheme.onSurfaceVariant,
                 )
             }
-            OutlinedButton(onClick = onNewRule) {
+            OutlinedButton(onClick = onNewTask) {
                 Text("新建任务")
             }
         }
@@ -599,22 +598,22 @@ private fun TaskListPage(
             contentPadding = PaddingValues(start = 16.dp, end = 16.dp, bottom = 32.dp),
             verticalArrangement = Arrangement.spacedBy(8.dp),
         ) {
-            if (appRules.isEmpty()) {
+            if (appTasks.isEmpty()) {
                 item {
                     Text(
-                        text = "该应用暂无任务。新建规则:进入此 App 界面时,按步骤自动执行。",
+                        text = "该应用暂无任务。新建任务:进入此 App 界面时,按步骤自动执行。",
                         style = MaterialTheme.typography.bodySmall,
                         color = MaterialTheme.colorScheme.onSurfaceVariant,
                     )
                 }
             }
 
-            items(appRules.size) { i ->
-                val rule = appRules[i]
+            items(appTasks.size) { i ->
+                val task = appTasks[i]
                 Card(
                     modifier = Modifier
                         .fillMaxWidth()
-                        .clickable { onEditRule(rule.id) },
+                        .clickable { onEditTask(task.id) },
                 ) {
                     Row(
                         modifier = Modifier.padding(12.dp),
@@ -622,7 +621,7 @@ private fun TaskListPage(
                     ) {
                         Column(modifier = Modifier.weight(1f)) {
                             Text(
-                                text = rule.stepsSummary(),
+                                text = task.stepsSummary(),
                                 style = MaterialTheme.typography.bodyMedium,
                                 fontWeight = FontWeight.Medium,
                                 maxLines = 2,
@@ -630,24 +629,30 @@ private fun TaskListPage(
                             )
                             Text(
                                 text = buildString {
-                                    rule.activityPattern?.let { append("Activity≈$it · ") }
-                                    append(if (rule.once) "仅一次" else "每次进入")
-                                    if (rule.loopIntervalMs > 0) {
-                                        append(" · 循环${rule.loopIntervalMs}ms")
-                                        if (rule.loopMaxRounds > 0) append("×${rule.loopMaxRounds}轮")
+                                    task.activityPattern?.let { append("Activity≈$it · ") }
+                                    when (val t = task.trigger) {
+                                        is Task.Trigger.OnPage ->
+                                            append(if (t.once) "仅一次" else "每次进入")
+                                        is Task.Trigger.Loop -> {
+                                            append("循环${t.intervalMs}ms")
+                                            if (t.maxRounds > 0) append("×${t.maxRounds}轮")
+                                        }
+                                    }
+                                    (task.onFailure as? Task.OnFailure.Retry)?.let {
+                                        append(" · 重试${it.times}次")
                                     }
                                 },
                                 style = MaterialTheme.typography.bodySmall,
                                 color = MaterialTheme.colorScheme.onSurfaceVariant,
                             )
                         }
-                        // 启用/停用开关:停用的规则不参与匹配
+                        // 启用/停用开关:停用的任务不参与匹配
                         Switch(
-                            checked = rule.enabled,
-                            onCheckedChange = { onToggleRule(rule.id, it) },
+                            checked = task.enabled,
+                            onCheckedChange = { onToggleTask(task.id, it) },
                         )
                         // 删除
-                        TextButton(onClick = { onPersistRules(rules - rule) }) { Text("删除") }
+                        TextButton(onClick = { onPersistTasks(tasks - task) }) { Text("删除") }
                     }
                 }
             }
@@ -720,19 +725,26 @@ private fun LogsScreen(modifier: Modifier = Modifier) {
 @Composable
 private fun RuleEditorPage(
     pkg: String,
-    existing: AutomationRule?,
-    onSave: (AutomationRule) -> Unit,
+    existing: Task?,
+    onSave: (Task) -> Unit,
     onBack: () -> Unit,
     modifier: Modifier = Modifier,
 ) {
     var activity by remember { mutableStateOf(existing?.activityPattern ?: "") }
-    var steps by remember { mutableStateOf(existing?.steps ?: emptyList<RuleStep>()) }
-    var once by remember { mutableStateOf(existing?.once ?: true) }
-    var loopOn by remember { mutableStateOf((existing?.loopIntervalMs ?: 0L) > 0) }
-    var loopIntervalSec by remember { mutableStateOf(((existing?.loopIntervalMs ?: 3000L) / 1000).toString()) }
-    var loopRounds by remember { mutableStateOf((existing?.loopMaxRounds ?: 0).toString()) }  // 0=无限
+    var steps by remember { mutableStateOf(existing?.steps ?: emptyList<Step>()) }
+    // 触发策略:进入页面(once) / 循环
+    var isLoop by remember { mutableStateOf(existing?.trigger is Task.Trigger.Loop) }
+    var once by remember {
+        mutableStateOf((existing?.trigger as? Task.Trigger.OnPage)?.once ?: true)
+    }
+    var loopIntervalSec by remember {
+        mutableStateOf((((existing?.trigger as? Task.Trigger.Loop)?.intervalMs ?: 3000L) / 1000).toString())
+    }
+    var loopRounds by remember {
+        mutableStateOf(((existing?.trigger as? Task.Trigger.Loop)?.maxRounds ?: 0).toString())
+    }
     // 正在编辑的步骤:index to draft;index<0 = 追加新步骤
-    var editing by remember { mutableStateOf<Pair<Int, RuleStep>?>(null) }
+    var editing by remember { mutableStateOf<Pair<Int, Step>?>(null) }
 
     Column(modifier = modifier.fillMaxSize()) {
         // 顶栏:返回 + 标题 + 保存
@@ -759,22 +771,24 @@ private fun RuleEditorPage(
             }
             TextButton(
                 onClick = {
+                    val trigger = if (isLoop) {
+                        Task.Trigger.Loop(
+                            intervalMs = (loopIntervalSec.toLongOrNull() ?: 3).coerceAtLeast(1) * 1000,
+                            maxRounds = (loopRounds.toIntOrNull() ?: 0).coerceAtLeast(0),
+                        )
+                    } else {
+                        Task.Trigger.OnPage(once = once)
+                    }
                     onSave(
-                        AutomationRule(
-                            id = existing?.id ?: "rule_${System.currentTimeMillis()}",
+                        Task(
+                            id = existing?.id ?: "task_${System.currentTimeMillis()}",
+                            name = existing?.name ?: "任务 ${steps.size} 步",
                             packageName = pkg,
                             activityPattern = activity.trim().takeIf { it.isNotBlank() },
                             enabled = existing?.enabled ?: true,
-                            once = once,
+                            trigger = trigger,
                             steps = steps,
-                            loopIntervalMs = if (loopOn) {
-                                (loopIntervalSec.toLongOrNull() ?: 3).coerceAtLeast(1) * 1000
-                            } else 0,
-                            loopMaxRounds = if (loopOn) {
-                                (loopRounds.toIntOrNull() ?: 0).coerceAtLeast(0)
-                            } else 0,
-                            maxRetries = existing?.maxRetries ?: 5,
-                            retryIntervalMs = existing?.retryIntervalMs ?: 500,
+                            onFailure = existing?.onFailure ?: Task.OnFailure.Retry(),
                         )
                     )
                 },
@@ -806,13 +820,16 @@ private fun RuleEditorPage(
                             singleLine = true,
                             modifier = Modifier.fillMaxWidth(),
                         )
-                        Row(verticalAlignment = Alignment.CenterVertically) {
-                            Text(
-                                text = "进入页面后只执行一次",
-                                modifier = Modifier.weight(1f),
-                                style = MaterialTheme.typography.bodySmall,
-                            )
-                            Switch(checked = once, onCheckedChange = { once = it })
+                        // 循环模式下无 once 概念,仅进入页面触发时显示
+                        if (!isLoop) {
+                            Row(verticalAlignment = Alignment.CenterVertically) {
+                                Text(
+                                    text = "进入页面后只执行一次",
+                                    modifier = Modifier.weight(1f),
+                                    style = MaterialTheme.typography.bodySmall,
+                                )
+                                Switch(checked = once, onCheckedChange = { once = it })
+                            }
                         }
                     }
                 }
@@ -843,7 +860,7 @@ private fun RuleEditorPage(
                                 verticalAlignment = Alignment.CenterVertically,
                             ) {
                                 Text(
-                                    text = "${i + 1}. ${step.summary()}",
+                                    text = "${i + 1}. ${step.label()}",
                                     style = MaterialTheme.typography.bodySmall,
                                     modifier = Modifier
                                         .weight(1f)
@@ -877,19 +894,19 @@ private fun RuleEditorPage(
                             horizontalArrangement = Arrangement.spacedBy(6.dp),
                         ) {
                             OutlinedButton(onClick = {
-                                editing = -1 to defaultStep(RuleStep.Action.Click)
+                                editing = -1 to Step.Click(NodeLocator(NodeLocator.Field.TEXT, NodeLocator.MatchMode.EQUALS, ""))
                             }) { Text("+点文本") }
                             OutlinedButton(onClick = {
-                                editing = -1 to defaultStep(RuleStep.Action.WaitForNode)
+                                editing = -1 to Step.Wait(NodeLocator(NodeLocator.Field.TEXT, NodeLocator.MatchMode.EQUALS, ""))
                             }) { Text("+等待") }
                             OutlinedButton(onClick = {
-                                editing = -1 to defaultStep(RuleStep.Action.Delay)
+                                editing = -1 to Step.Sleep()
                             }) { Text("+延时") }
                             OutlinedButton(onClick = {
-                                editing = -1 to defaultStep(RuleStep.Action.PressBack)
+                                editing = -1 to Step.Back
                             }) { Text("+返回") }
                             OutlinedButton(onClick = {
-                                editing = -1 to defaultStep(RuleStep.Action.Swipe)
+                                editing = -1 to Step.Swipe()
                             }) { Text("+滑动") }
                         }
                     }
@@ -909,9 +926,9 @@ private fun RuleEditorPage(
                                 modifier = Modifier.weight(1f),
                                 style = MaterialTheme.typography.bodySmall,
                             )
-                            Switch(checked = loopOn, onCheckedChange = { loopOn = it })
+                            Switch(checked = isLoop, onCheckedChange = { isLoop = it })
                         }
-                        if (loopOn) {
+                        if (isLoop) {
                             OutlinedTextField(
                                 value = loopIntervalSec,
                                 onValueChange = { loopIntervalSec = it.filter { c -> c.isDigit() } },
@@ -946,66 +963,44 @@ private fun RuleEditorPage(
     }
 }
 
-/** 步骤行点击进入编辑;步骤列表点击行替换为编辑入口(渲染在摘要行上不可行,改用编辑按钮) */
-private fun defaultStep(action: RuleStep.Action): RuleStep = RuleStep(
-    conditions = if (action is RuleStep.Action.Click || action is RuleStep.Action.WaitForNode) {
-        listOf(NodeCondition(NodeCondition.Field.TEXT, NodeCondition.MatchMode.EQUALS, ""))
-    } else {
-        emptyList()
-    },
-    action = action,
-)
-
-/** 单步骤编辑弹窗:匹配条件(viewId/文本/描述/类名,可组合 AND)+ 动作与参数 */
+/** 单步骤编辑弹窗:单定位器(字段 4 选 1 + 等于/包含)+ 动作专属参数 */
 @Composable
 private fun StepEditorDialog(
-    initial: RuleStep,
+    initial: Step,
     onDismiss: () -> Unit,
-    onSave: (RuleStep) -> Unit,
+    onSave: (Step) -> Unit,
 ) {
-    fun condOf(field: NodeCondition.Field) =
-        initial.conditions.firstOrNull { it.field == field }
+    // 动作种类:key 与保存时的分支一一对应
+    fun kindOf(s: Step) = when (s) {
+        is Step.Click -> "Click"
+        is Step.Wait -> "Wait"
+        is Step.Sleep -> "Delay"
+        is Step.Back -> "Back"
+        is Step.Swipe -> "Swipe"
+    }
+    fun locatorOf(s: Step): NodeLocator? = when (s) {
+        is Step.Click -> s.locator
+        is Step.Wait -> s.locator
+        else -> null
+    }
 
-    var viewId by remember { mutableStateOf(condOf(NodeCondition.Field.VIEW_ID)?.value ?: "") }
-    var viewIdContains by remember {
-        mutableStateOf(condOf(NodeCondition.Field.VIEW_ID)?.mode == NodeCondition.MatchMode.CONTAINS)
+    var actionName by remember { mutableStateOf(kindOf(initial)) }
+    val initialLocator = locatorOf(initial)
+    var field by remember {
+        mutableStateOf(initialLocator?.field ?: NodeLocator.Field.TEXT)
     }
-    var text by remember { mutableStateOf(condOf(NodeCondition.Field.TEXT)?.value ?: "") }
-    var textContains by remember {
-        mutableStateOf(condOf(NodeCondition.Field.TEXT)?.mode == NodeCondition.MatchMode.CONTAINS)
+    var contains by remember {
+        mutableStateOf(initialLocator?.mode == NodeLocator.MatchMode.CONTAINS)
     }
-    var desc by remember { mutableStateOf(condOf(NodeCondition.Field.DESC)?.value ?: "") }
-    var descContains by remember {
-        mutableStateOf(condOf(NodeCondition.Field.DESC)?.mode == NodeCondition.MatchMode.CONTAINS)
+    var value by remember { mutableStateOf(initialLocator?.value ?: "") }
+    var timeoutSec by remember {
+        mutableStateOf((((initial as? Step.Wait)?.timeoutMs ?: 5000L) / 1000).toString())
     }
-    var cls by remember { mutableStateOf(condOf(NodeCondition.Field.CLASS_NAME)?.value ?: "") }
-    var clsContains by remember {
-        mutableStateOf(condOf(NodeCondition.Field.CLASS_NAME)?.mode == NodeCondition.MatchMode.CONTAINS)
-    }
-    var actionName by remember {
-        mutableStateOf(
-            when (initial.action) {
-                is RuleStep.Action.Click -> "Click"
-                is RuleStep.Action.WaitForNode -> "Wait"
-                is RuleStep.Action.Delay -> "Delay"
-                is RuleStep.Action.PressBack -> "Back"
-                is RuleStep.Action.Swipe -> "Swipe"
-            }
-        )
-    }
-    var timeoutSec by remember { mutableStateOf((initial.timeoutMs / 1000).toString()) }
-    var delaySec by remember { mutableStateOf((initial.delayMs / 1000).toString()) }
-    var swipeUp by remember { mutableStateOf(initial.swipeUp) }
+    var delaySec by remember { mutableStateOf(((initial as? Step.Sleep)?.ms ?: 1000L).toString()) }
+    var swipeUp by remember { mutableStateOf((initial as? Step.Swipe)?.up ?: true) }
 
-    // 非空输入即成为一条条件,多条同时 AND
-    val conditions = buildList {
-        if (viewId.isNotBlank()) add(NodeCondition(NodeCondition.Field.VIEW_ID, mode(viewIdContains), viewId.trim()))
-        if (text.isNotBlank()) add(NodeCondition(NodeCondition.Field.TEXT, mode(textContains), text.trim()))
-        if (desc.isNotBlank()) add(NodeCondition(NodeCondition.Field.DESC, mode(descContains), desc.trim()))
-        if (cls.isNotBlank()) add(NodeCondition(NodeCondition.Field.CLASS_NAME, mode(clsContains), cls.trim()))
-    }
-    val needCondition = actionName == "Click" || actionName == "Wait"
-    val valid = !needCondition || conditions.isNotEmpty()
+    val needLocator = actionName == "Click" || actionName == "Wait"
+    val valid = !needLocator || value.isNotBlank()
 
     AlertDialog(
         onDismissRequest = onDismiss,
@@ -1015,19 +1010,6 @@ private fun StepEditorDialog(
                 modifier = Modifier.verticalScroll(rememberScrollState()),
                 verticalArrangement = Arrangement.spacedBy(8.dp),
             ) {
-                Text(
-                    text = "匹配条件(可组合,全部满足才命中)",
-                    style = MaterialTheme.typography.bodySmall,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant,
-                )
-                CondRow("viewId", viewId, viewIdContains,
-                    { v, c -> viewId = v; viewIdContains = c }, "如 btn_play(不含包名)")
-                CondRow("文本", text, textContains,
-                    { v, c -> text = v; textContains = c }, "节点文本")
-                CondRow("描述", desc, descContains,
-                    { v, c -> desc = v; descContains = c }, "contentDescription")
-                CondRow("类名", cls, clsContains,
-                    { v, c -> cls = v; clsContains = c }, "如 TextView")
                 Text(
                     text = "动作",
                     style = MaterialTheme.typography.bodySmall,
@@ -1050,6 +1032,49 @@ private fun StepEditorDialog(
                             },
                         ) { Text(label) }
                     }
+                }
+                if (needLocator) {
+                    Text(
+                        text = "定位节点",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    )
+                    // 字段 4 选 1(单定位器,不再多字段 AND)
+                    Row(
+                        modifier = Modifier.horizontalScroll(rememberScrollState()),
+                        horizontalArrangement = Arrangement.spacedBy(6.dp),
+                    ) {
+                        listOf(
+                            NodeLocator.Field.TEXT to "文本",
+                            NodeLocator.Field.VIEW_ID to "viewId",
+                            NodeLocator.Field.DESC to "描述",
+                            NodeLocator.Field.CLASS_NAME to "类名",
+                        ).forEach { (f, label) ->
+                            OutlinedButton(
+                                onClick = { field = f },
+                                colors = if (field == f) ButtonDefaults.outlinedButtonColors(
+                                    containerColor = MaterialTheme.colorScheme.primaryContainer
+                                ) else ButtonDefaults.outlinedButtonColors(),
+                            ) { Text(label) }
+                        }
+                    }
+                    CondRow(
+                        label = when (field) {
+                            NodeLocator.Field.TEXT -> "文本"
+                            NodeLocator.Field.VIEW_ID -> "viewId"
+                            NodeLocator.Field.DESC -> "描述"
+                            NodeLocator.Field.CLASS_NAME -> "类名"
+                        },
+                        value = value,
+                        contains = contains,
+                        onChange = { v, c -> value = v; contains = c },
+                        hint = when (field) {
+                            NodeLocator.Field.TEXT -> "节点文本"
+                            NodeLocator.Field.VIEW_ID -> "如 btn_play(不含包名)"
+                            NodeLocator.Field.DESC -> "contentDescription"
+                            NodeLocator.Field.CLASS_NAME -> "如 TextView"
+                        },
+                    )
                 }
                 when (actionName) {
                     "Wait" -> OutlinedTextField(
@@ -1087,20 +1112,18 @@ private fun StepEditorDialog(
             TextButton(
                 enabled = valid,
                 onClick = {
+                    // 同类型编辑保留原 id,换类型则生成新 id
+                    fun keepId(s: Step): String =
+                        if (kindOf(s) == kindOf(initial)) initial.id else java.util.UUID.randomUUID().toString()
+                    val locator = NodeLocator(field, mode(contains), value.trim())
                     onSave(
-                        RuleStep(
-                            conditions = conditions,
-                            action = when (actionName) {
-                                "Wait" -> RuleStep.Action.WaitForNode
-                                "Delay" -> RuleStep.Action.Delay
-                                "Back" -> RuleStep.Action.PressBack
-                                "Swipe" -> RuleStep.Action.Swipe
-                                else -> RuleStep.Action.Click
-                            },
-                            timeoutMs = (timeoutSec.toLongOrNull() ?: 5).coerceAtLeast(1) * 1000,
-                            delayMs = (delaySec.toLongOrNull() ?: 1).coerceAtLeast(0) * 1000,
-                            swipeUp = swipeUp,
-                        )
+                        when (actionName) {
+                            "Wait" -> Step.Wait(locator, (timeoutSec.toLongOrNull() ?: 5).coerceAtLeast(1) * 1000, keepId(Step.Wait(locator)))
+                            "Delay" -> Step.Sleep((delaySec.toLongOrNull() ?: 1).coerceAtLeast(0) * 1000, keepId(Step.Sleep()))
+                            "Back" -> Step.Back
+                            "Swipe" -> Step.Swipe(swipeUp, keepId(Step.Swipe()))
+                            else -> Step.Click(locator, keepId(Step.Click(locator)))
+                        }
                     )
                 },
             ) { Text("确定") }
@@ -1112,7 +1135,7 @@ private fun StepEditorDialog(
 }
 
 private fun mode(contains: Boolean) =
-    if (contains) NodeCondition.MatchMode.CONTAINS else NodeCondition.MatchMode.EQUALS
+    if (contains) NodeLocator.MatchMode.CONTAINS else NodeLocator.MatchMode.EQUALS
 
 /** 条件输入行:值 + 匹配方式切换(等于/包含) */
 @Composable
