@@ -34,6 +34,13 @@
     -->
     <uses-permission android:name="android.permission.SYSTEM_ALERT_WINDOW" />
 
+    <!--
+        REQUEST_IGNORE_BATTERY_OPTIMIZATIONS:主页「权限管理」卡片直接拉起
+        「忽略电池优化」授权弹窗(ACTION_REQUEST_IGNORE_BATTERY_OPTIMIZATIONS)所需,
+        用户确认后本应用进入系统电池优化白名单,避免后台任务被杀。
+    -->
+    <uses-permission android:name="android.permission.REQUEST_IGNORE_BATTERY_OPTIMIZATIONS" />
+
     <application
         android:name=".ComposeDemoApplication"
         android:allowBackup="true"

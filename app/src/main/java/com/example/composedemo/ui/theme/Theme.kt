@@ -13,7 +13,7 @@ import androidx.compose.ui.platform.LocalContext
 @Composable
 fun ComposeDemoTheme(
     darkTheme: Boolean = isSystemInDarkTheme(),
-    dynamicColor: Boolean = true,
+    dynamicColor: Boolean = false,  // 默认关闭动态取色,使用品牌配色保证观感一致
     content: @Composable () -> Unit,
 ) {
     val colorScheme = when {
@@ -21,8 +21,8 @@ fun ComposeDemoTheme(
             val context = LocalContext.current
             if (darkTheme) dynamicDarkColorScheme(context) else dynamicLightColorScheme(context)
         }
-        darkTheme -> darkColorScheme()
-        else -> lightColorScheme()
+        darkTheme -> BrandDarkColorScheme
+        else -> BrandLightColorScheme
     }
 
     MaterialTheme(

@@ -1,26 +1,26 @@
 <?xml version="1.0" encoding="utf-8"?>
 <resources xmlns:android="http://schemas.android.com/apk/res/android">
-    <string name="app_name">短剧助手</string>
-    <string name="accessibility_service_label">短剧助手无障碍服务</string>
-    <string name="accessibility_service_description">用于读取界面控件、定位按钮并模拟点击,以便自动播放短剧。</string>
+    <string name="app_name">自动化助手</string>
+    <string name="accessibility_service_label">自动化助手无障碍服务</string>
+    <string name="accessibility_service_description">用于读取界面控件、定位按钮并模拟点击,以便自动执行任务。</string>
 
     <!-- 写入安全设置权限已授权 -->
-    <string name="status_secure_granted">已获得「写入安全设置」权限(WRITE_SECURE_SETTINGS),可以读写无障碍开关,本应用已忽略 Shizuku 相关请求。</string>
+    <string name="status_secure_granted">已授权,可读写无障碍开关。</string>
 
     <!-- 写入安全设置权限未授权:说明它与「修改系统设置」是两个不同权限 -->
-    <string name="status_need_secure">尚未获得「写入安全设置」权限(WRITE_SECURE_SETTINGS)。注意:它与系统设置里的「修改系统设置」是两个不同权限,后者无法替代。本权限只能在 manifest 声明后由 ADB / Shizuku 授予,点击按钮通过 Shizuku 执行 pm grant。</string>
+    <string name="status_need_secure">需通过 ADB / Shizuku 授权。</string>
 
     <!-- 无障碍服务已开启 -->
-    <string name="status_service_running">无障碍服务已开启。</string>
+    <string name="status_service_running">服务运行中。</string>
 
     <!-- 无障碍服务未开启 -->
-    <string name="status_service_disabled">无障碍服务未开启。</string>
+    <string name="status_service_disabled">用于模拟点击与读取界面控件。</string>
 
     <!-- Shizuku 服务已连接 -->
-    <string name="status_shizuku_ready">Shizuku 服务已连接,可代授「写入安全设置」权限。</string>
+    <string name="status_shizuku_ready">已连接,可代授安全设置权限。</string>
 
     <!-- Shizuku 服务未连接 -->
-    <string name="status_shizuku_unready">Shizuku 服务未连接。请打开 Shizuku 应用并启动服务。</string>
+    <string name="status_shizuku_unready">未连接,请启动 Shizuku 服务。</string>
 
     <!-- Shizuku 授权弹窗被拒绝 -->
     <string name="status_shizuku_denied">已取消 Shizuku 授权,本次未连接。</string>
@@ -48,7 +48,7 @@
     <!-- ==================== 确认弹窗 ==================== -->
     <!-- 确认跳转系统无障碍设置页(缺「写入安全设置」权限时使用) -->
     <string name="confirm_a11y_title">是否跳转无障碍设置?</string>
-    <string name="confirm_a11y_message">当前缺少「写入安全设置」权限,应用无法自动开启无障碍服务。\n\n点击「继续」将跳转到系统无障碍设置页,请手动开启「短剧助手无障碍服务」。</string>
+    <string name="confirm_a11y_message">当前缺少「写入安全设置」权限,应用无法自动开启无障碍服务。\n\n点击「继续」将跳转到系统无障碍设置页,请手动开启「自动化助手无障碍服务」。</string>
     <string name="confirm_ok">继续</string>
     <string name="confirm_cancel">取消</string>
 

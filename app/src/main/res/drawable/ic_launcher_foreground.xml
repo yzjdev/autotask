@@ -1,10 +1,33 @@
 <?xml version="1.0" encoding="utf-8"?>
+<!-- 自动化助手图标:循环箭头(自动循环执行)+ 中央齿轮(通用自动化操作) -->
 <vector xmlns:android="http://schemas.android.com/apk/res/android"
     android:width="108dp"
     android:height="108dp"
     android:viewportWidth="108"
     android:viewportHeight="108">
+    <!-- 上弧:从右上逆时针经顶部到左侧,箭头指向左下缺口方向 -->
+    <path
+        android:pathData="M64,36.68 A20,20 0 0 0 35.21,60.84"
+        android:strokeColor="#22D3EE"
+        android:strokeWidth="7"
+        android:strokeLineCap="round" />
+    <!-- 下弧:从左下逆时针经底部到右上 -->
+    <path
+        android:pathData="M44,71.32 A20,20 0 0 0 72.79,47.16"
+        android:strokeColor="#22D3EE"
+        android:strokeWidth="7"
+        android:strokeLineCap="round" />
+    <!-- 左下箭头(沿循环方向指向右下) -->
+    <path
+        android:fillColor="#22D3EE"
+        android:pathData="M37.60,67.42 L39.10,58.36 L30.64,61.44 Z" />
+    <!-- 右上箭头(沿循环方向指向左上) -->
+    <path
+        android:fillColor="#22D3EE"
+        android:pathData="M70.40,40.58 L68.90,49.64 L77.36,46.56 Z" />
+    <!-- 中央齿轮:8 齿,外圆 R13.5,齿谷 R9.8,中心孔 R5(evenOdd 镂空) -->
     <path
         android:fillColor="#FFFFFF"
-        android:pathData="M54,30 a24,24 0 1,0 0,48 a16,16 0 1,1 0,-32 z" />
+        android:fillType="evenOdd"
+        android:pathData="M67.45,55.18 A13.5,13.5 0 0 1 66.23,59.70 L62.49,58.90 A9.8,9.8 0 0 1 60.30,61.51 L62.68,64.34 A13.5,13.5 0 0 1 58.62,66.69 L56.54,63.47 A9.8,9.8 0 0 1 53.15,63.76 L52.82,67.45 A13.5,13.5 0 0 1 48.30,66.23 L49.10,62.49 A9.8,9.8 0 0 1 46.49,60.30 L43.66,62.68 A13.5,13.5 0 0 1 41.31,58.62 L44.53,56.54 A9.8,9.8 0 0 1 44.24,53.15 L40.55,52.82 A13.5,13.5 0 0 1 41.77,48.30 L45.51,49.10 A9.8,9.8 0 0 1 47.70,46.49 L45.32,43.66 A13.5,13.5 0 0 1 49.38,41.31 L51.46,44.53 A9.8,9.8 0 0 1 54.85,44.24 L55.18,40.55 A13.5,13.5 0 0 1 59.70,41.77 L58.90,45.51 A9.8,9.8 0 0 1 61.51,47.70 L64.34,45.32 A13.5,13.5 0 0 1 66.69,49.38 L63.47,51.46 A9.8,9.8 0 0 1 63.76,53.15 Z M59,54 A5,5 0 1 1 49,54 A5,5 0 1 1 59,54 Z" />
 </vector>

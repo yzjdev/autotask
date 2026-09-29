@@ -40,24 +40,22 @@ object TaskStore {
         context.getSharedPreferences(PREFS, Context.MODE_PRIVATE)
 
     /**
-     * 查询已安装的用户应用(排除系统应用),按应用名排序。
-     * 用于应用列表与新建任务时选择目标包名。
+     * 查询全部已安装应用(用户 + 系统按 [includeSystem] 过滤),按应用名排序。
+     * 不按 launcher 入口过滤:纯 widget/服务类应用同样要出现在列表中
+     * (自动化任务可能只需匹配前台包名,不一定要能拉起)。
+     * 依赖 QUERY_ALL_PACKAGES(Android 11+ package visibility)。
      */
-    fun loadInstalledApps(context: Context): List<AppInfo> {
+    fun loadInstalledApps(context: Context, includeSystem: Boolean = true): List<AppInfo> {
         val pm = context.packageManager
-        val intent = android.content.Intent(android.content.Intent.ACTION_MAIN)
-            .addCategory(android.content.Intent.CATEGORY_LAUNCHER)
-        return pm.queryIntentActivities(intent, 0)
+        return pm.getInstalledPackages(0)
             .asSequence()
-            .map { it.activityInfo.applicationInfo }
-            .distinctBy { it.packageName }
-            .filter { pm.getLaunchIntentForPackage(it.packageName) != null }  // 有入口的才可启动
-            .filter { !it.packageName.startsWith("com.android.") && !it.packageName.startsWith("android") }
-            .map { AppInfo(it.packageName, pm.getApplicationLabel(it).toString()) }
+            .mapNotNull { it.applicationInfo }
+            .filter { includeSystem || (it.flags and android.content.pm.ApplicationInfo.FLAG_SYSTEM) == 0 }
+            .map { AppInfo(it.packageName, pm.getApplicationLabel(it).toString(), (it.flags and android.content.pm.ApplicationInfo.FLAG_SYSTEM) != 0) }
             .sortedBy { it.label.lowercase() }
             .toList()
     }
 
-    /** 应用条目:包名 + 显示名 */
-    data class AppInfo(val packageName: String, val label: String)
+    /** 应用条目:包名 + 显示名 + 是否系统应用 */
+    data class AppInfo(val packageName: String, val label: String, val isSystem: Boolean = false)
 }

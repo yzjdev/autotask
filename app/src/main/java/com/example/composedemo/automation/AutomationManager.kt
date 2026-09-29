@@ -223,8 +223,13 @@ class AutomationManager private constructor(appContext: Context) {
 
     @MainThread
     fun requestShizuku(onReady: (() -> Unit)? = null, onFail: (() -> Unit)? = null) {
-        // 授权成功即自动代授写入安全设置并同步 UI;调用方传了 onReady 则以它为准
-        val ready: () -> Unit = onReady ?: { tryGrantSecureSetting() }
+        // 授权成功先代授写入安全设置,成功后再执行 onReady(如继续开无障碍);
+        // onReady 为 null 时仅代授(兼容旧调用点)
+        val ready: () -> Unit = {
+            tryGrantSecureSetting { granted ->
+                if (granted) onReady?.invoke()
+            }
+        }
         if (secureGranted) {
             setStatus("已有写入安全设置权限,无需再授权")
             notifyState()
@@ -419,10 +424,11 @@ class AutomationManager private constructor(appContext: Context) {
     // ---- 写入安全设置权限:仅通过 Shizuku 代授 ----
 
     @MainThread
-    private fun tryGrantSecureSetting() {
+    private fun tryGrantSecureSetting(onDone: ((Boolean) -> Unit)? = null) {
         if (secureGranted) {
             setStatus("Shizuku 已连接")
             notifyState()
+            onDone?.invoke(true)
             return
         }
         setStatus("正在通过 Shizuku 授予写入安全设置权限…")
@@ -433,9 +439,11 @@ class AutomationManager private constructor(appContext: Context) {
             val ok = grantWriteSecureSettingsViaShizuku()
             if (ok) {
                 markSecureGranted()
+                onDone?.invoke(true)
             } else {
                 setStatus("Shizuku 代授写入安全设置权限失败,请确认 Shizuku 以 shell/adb 方式启动")
                 notifyState()
+                onDone?.invoke(false)
             }
         }, 0)
     }

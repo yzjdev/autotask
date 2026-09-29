@@ -51,26 +51,146 @@ data class NodeLocator(
 }
 
 /**
+ * 节点查询表达式:多个断言用 & (且) / | (或) 连接,& 优先级高于 |。
+ *
+ * 断言语法:`字段 运算符 值`,字段: text / vid / desc / visible;
+ * 运算符: =(等于) / !=(不等于)。例:
+ *   text=跳过 & visible=true
+ *   vid!=btn_ad | text contains 广告 → 写作 text!=广告 之类
+ *
+ * 由 [parse] 构造,[matches] 对节点求值。
+ */
+@Serializable
+data class NodeQuery(
+    /** 顶层 OR 组;组内 AND 连接 */
+    val groups: List<List<Assertion>>,
+) {
+    @Serializable
+    data class Assertion(
+        val field: Field,
+        val op: Op,
+        val value: String,
+    ) {
+        @Serializable
+        enum class Field { TEXT, VID, DESC, VISIBLE }
+
+        @Serializable
+        enum class Op { EQ, NEQ }
+
+        fun matches(node: AccessibilityNodeInfo): Boolean {
+            val actual: String = when (field) {
+                Field.TEXT -> node.text?.toString() ?: ""
+                Field.VID -> node.viewIdResourceName?.substringAfter('/') ?: ""
+                Field.DESC -> node.contentDescription?.toString() ?: ""
+                Field.VISIBLE -> if (node.isVisibleToUser) "true" else "false"
+            }
+            return when (op) {
+                Op.EQ -> actual.equals(value, ignoreCase = field == Field.VISIBLE)
+                Op.NEQ -> !actual.equals(value, ignoreCase = field == Field.VISIBLE)
+            }
+        }
+
+        /** 编辑器/日志摘要 */
+        fun summary(): String = "${field.key} ${if (op == Op.EQ) "=" else "!="} \"$value\""
+    }
+
+    /** 任一 AND 组全部成立即命中 */
+    fun matches(node: AccessibilityNodeInfo): Boolean =
+        groups.any { group -> group.isNotEmpty() && group.all { it.matches(node) } }
+
+    /** 编辑器/日志摘要 */
+    fun summary(): String =
+        groups.joinToString(" | ") { group -> group.joinToString(" & ") { it.summary() } }
+
+    companion object {
+        /** 字段中文别名 → 枚举 */
+        private val FIELD_ALIASES = mapOf(
+            "text" to Assertion.Field.TEXT, "文本" to Assertion.Field.TEXT,
+            "vid" to Assertion.Field.VID, "id" to Assertion.Field.VID,
+            "desc" to Assertion.Field.DESC, "描述" to Assertion.Field.DESC,
+            "visible" to Assertion.Field.VISIBLE, "可见" to Assertion.Field.VISIBLE,
+        )
+
+        /**
+         * 解析表达式文本;空文本返回 null(无条件)。
+         * 语法错误抛 [IllegalArgumentException],由调用方提示。
+         */
+        fun parse(expr: String): NodeQuery? {
+            val src = expr.trim()
+            if (src.isEmpty()) return null
+            val groups = src.split('|').map { orPart ->
+                orPart.split('&').map { andPart ->
+                    val m = Regex("""^\s*(\S+)\s*(==|!=|=)\s*(.+?)\s*$""").find(andPart)
+                        ?: throw IllegalArgumentException("无法解析: $andPart")
+                    val field = FIELD_ALIASES[m.groupValues[1].lowercase()]
+                        ?: throw IllegalArgumentException("未知字段: ${m.groupValues[1]}")
+                    val op = if (m.groupValues[2] == "!=") Assertion.Op.NEQ else Assertion.Op.EQ
+                    var v = m.groupValues[3].trim()
+                    // 去掉可选引号
+                    if (v.length >= 2 && (v.startsWith('"') && v.endsWith('"') || v.startsWith('\'') && v.endsWith('\''))) {
+                        v = v.substring(1, v.length - 1)
+                    }
+                    Assertion(field, op, v)
+                }
+            }
+            if (groups.any { it.isEmpty() }) throw IllegalArgumentException("空的 & 组")
+            return NodeQuery(groups)
+        }
+
+        /** 宽松解析:失败返回 null,用于恢复旧数据 */
+        fun parseOrNull(expr: String): NodeQuery? = try {
+            parse(expr)
+        } catch (_: IllegalArgumentException) {
+            null
+        }
+    }
+}
+
+private val NodeQuery.Assertion.Field.key: String
+    get() = when (this) {
+        NodeQuery.Assertion.Field.TEXT -> "text"
+        NodeQuery.Assertion.Field.VID -> "vid"
+        NodeQuery.Assertion.Field.DESC -> "desc"
+        NodeQuery.Assertion.Field.VISIBLE -> "visible"
+    }
+
+/**
+ * 步骤条件:动作执行前的门槛检查,不满足则跳过本步(不算失败)。
+ * expectPresent = true 要求表达式命中,false 要求不命中。
+ */
+@Serializable
+data class StepCondition(
+    val query: NodeQuery,
+    val expectPresent: Boolean = true,
+) {
+    /** 编辑器/日志摘要 */
+    fun summary(): String =
+        (if (expectPresent) "有" else "无") + " " + query.summary()
+}
+
+/**
  * 执行步骤:密封接口,每种动作只带自己的参数。
+ *
+ * 每一步 = 条件([condition],可选门槛,不满足跳过) + 动作 + 次数([repeat])。
  */
 @Serializable
 sealed interface Step {
     val id: String
 
+    /** 动作执行前的条件门槛;null = 无条件 */
+    val condition: StepCondition?
+
+    /** 执行次数,>=1 */
+    val repeat: Int
+
     /** 点击命中节点;不可点击时退化为中心点坐标点击 */
     @Serializable
     @SerialName("click")
     data class Click(
-        val locator: NodeLocator,
-        override val id: String = uuid(),
-    ) : Step
-
-    /** 等待定位器命中的节点出现,超时算本轮失败 */
-    @Serializable
-    @SerialName("wait")
-    data class Wait(
-        val locator: NodeLocator,
-        val timeoutMs: Long = 5000L,
+        /** 点击目标:查询命中该节点才执行 */
+        val query: NodeQuery,
+        override val condition: StepCondition? = null,
+        override val repeat: Int = 1,
         override val id: String = uuid(),
     ) : Step
 
@@ -79,6 +199,8 @@ sealed interface Step {
     @SerialName("sleep")
     data class Sleep(
         val ms: Long = 1000L,
+        override val condition: StepCondition? = null,
+        override val repeat: Int = 1,
         override val id: String = uuid(),
     ) : Step
 
@@ -87,15 +209,19 @@ sealed interface Step {
     @SerialName("swipe")
     data class Swipe(
         val up: Boolean = true,
+        override val condition: StepCondition? = null,
+        override val repeat: Int = 1,
         override val id: String = uuid(),
     ) : Step
 
     /** 系统返回键 */
     @Serializable
     @SerialName("back")
-    data object Back : Step {
-        override val id: String = "back"
-    }
+    data class Back(
+        override val condition: StepCondition? = null,
+        override val repeat: Int = 1,
+        override val id: String = uuid(),
+    ) : Step
 }
 
 /**
@@ -160,10 +286,10 @@ data class Task(
 /** 步骤展示摘要(编辑器/日志) */
 fun Step.label(): String = when (this) {
     is Step.Click -> {
-        val text = locator.takeIf { it.field == NodeLocator.Field.TEXT }?.value
-        if (text != null) "点「$text」" else "点击"
+        val text = query.groups.firstOrNull()
+            ?.firstOrNull { it.field == NodeQuery.Assertion.Field.TEXT }?.value
+        if (text != null) "点「$text」" else "点击 ${query.summary()}"
     }
-    is Step.Wait -> "等待"
     is Step.Sleep -> "延时${ms}ms"
     is Step.Back -> "返回"
     is Step.Swipe -> if (up) "上滑" else "下滑"

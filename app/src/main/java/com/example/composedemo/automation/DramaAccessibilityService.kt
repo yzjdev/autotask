@@ -3,10 +3,16 @@ package com.example.composedemo.automation
 import android.accessibilityservice.AccessibilityService
 import android.accessibilityservice.GestureDescription
 import android.content.ComponentName
+import android.content.pm.ActivityInfo
 import android.content.Intent
 import android.graphics.Path
+import android.graphics.PixelFormat
 import android.os.Handler
 import android.os.Looper
+import android.view.Gravity
+import android.view.View
+import android.view.WindowManager
+import android.provider.Settings
 import android.view.accessibility.AccessibilityEvent
 import android.view.accessibility.AccessibilityNodeInfo
 import java.util.HashSet
@@ -64,6 +70,44 @@ open class DramaAccessibilityService : AccessibilityService() {
     // 无障碍调试悬浮窗:由主页开关控制显隐,连接后不自动显示
     private val debugOverlay = OverlayDebugWindow(this)
 
+    // 一像素完全透明悬浮窗:触摸穿透,不遮挡不影响任何操作
+    private var pixelView: View? = null
+
+    /** 显示一像素透明悬浮窗(触摸穿透) */
+    private fun showPixelOverlay() {
+        if (pixelView != null) return
+        if (!Settings.canDrawOverlays(this)) return
+        val wm = getSystemService(WindowManager::class.java) ?: return
+        val lp = WindowManager.LayoutParams(
+            1, 1,
+            WindowManager.LayoutParams.TYPE_ACCESSIBILITY_OVERLAY,
+            WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE
+                or WindowManager.LayoutParams.FLAG_NOT_TOUCHABLE
+                or WindowManager.LayoutParams.FLAG_NOT_TOUCH_MODAL
+                or WindowManager.LayoutParams.FLAG_LAYOUT_NO_LIMITS,
+            PixelFormat.TRANSPARENT,
+        ).apply {
+            gravity = Gravity.CENTER
+        }
+        val view = View(this)
+        view.setBackgroundColor(0x00000000)
+        try {
+            wm.addView(view, lp)
+            pixelView = view
+        } catch (_: Exception) {
+        }
+    }
+
+    private fun hidePixelOverlay() {
+        pixelView?.let { v ->
+            try {
+                getSystemService(WindowManager::class.java)?.removeView(v)
+            } catch (_: Exception) {
+            }
+        }
+        pixelView = null
+    }
+
     /** 任务引擎 v4:窗口切换时匹配任务并执行(协程顺序流) */
     val taskRunner = TaskRunner(this)
 
@@ -77,7 +121,10 @@ open class DramaAccessibilityService : AccessibilityService() {
         clearProcessed()
         notifyRunning(true)
         // 服务连接时加载持久化任务,立即生效
-        taskRunner.setTasks(TaskStore.loadAll(this))
+        val loaded = TaskStore.loadAll(this)
+        taskRunner.setTasks(loaded)
+        LogStore.log("🔌 无障碍服务已连接,加载任务 ${loaded.size} 个")
+        showPixelOverlay()
     }
 
     /** 调试悬浮球当前是否显示 */
@@ -92,11 +139,13 @@ open class DramaAccessibilityService : AccessibilityService() {
     }
 
     override fun onUnbind(intent: Intent?): Boolean {
+        LogStore.log("🔌 无障碍服务已断开(unbind)")
         sInstance = null
         clearProcessed()
         notifyRunning(false)
         taskRunner.cancelAll()
         debugOverlay.hide()
+        hidePixelOverlay()
         return super.onUnbind(intent)
     }
 
@@ -106,6 +155,7 @@ open class DramaAccessibilityService : AccessibilityService() {
         notifyRunning(false)
         taskRunner.cancelAll()
         debugOverlay.hide()
+        hidePixelOverlay()
         super.onDestroy()
     }
 
@@ -126,17 +176,18 @@ open class DramaAccessibilityService : AccessibilityService() {
 
     override fun onAccessibilityEvent(event: AccessibilityEvent?) {
         if (event == null) return
-        // 忽略自己 App 内的事件,避免触发循环
         val packageName = event.packageName?.toString()
-        if (packageName == this.packageName) return
 
         when (event.eventType) {
             AccessibilityEvent.TYPE_WINDOW_STATE_CHANGED -> {
                 val className = event.className?.toString() ?: ""
-                // 过滤非 Activity 窗口(Dialog/PopupWindow/输入法等,多为 android.widget.*
-                // 或 android.app.Dialog 前缀):通过前缀检查的 className 视为当前 Activity
-                if (packageName != null && isActivityClassName(className)) {
-                    lastActivity = ComponentName(packageName, className)
+                // 过滤非 Activity 窗口(Dialog/PopupWindow/输入法等):
+                // 先用前缀粗筛,再用 PackageManager.getActivityInfo 精确反查,
+                // 只有真实注册的 Activity 才视为前台切换
+                if (packageName != null && isActivityClassName(className) && isRealActivity(packageName, className)) {
+                    val cn = ComponentName(packageName, className)
+                    lastActivity = cn
+                    notifyActivityChanged(cn)
                 }
                 onWindowChanged(packageName ?: "", className)
             }
@@ -155,6 +206,21 @@ open class DramaAccessibilityService : AccessibilityService() {
     var lastActivity: ComponentName? = null
         private set
 
+    /** lastActivity 变化监听(悬浮窗标题实时跟随前台 Activity) */
+    private val activityListeners = CopyOnWriteArrayList<(ComponentName) -> Unit>()
+
+    fun addActivityListener(listener: (ComponentName) -> Unit) {
+        activityListeners += listener
+    }
+
+    fun removeActivityListener(listener: (ComponentName) -> Unit) {
+        activityListeners -= listener
+    }
+
+    private fun notifyActivityChanged(cn: ComponentName) {
+        activityListeners.toList().forEach { it(cn) }
+    }
+
     /** className 前缀过滤:排除 android.widget.* / android.app.* 等系统窗口类 */
     private fun isActivityClassName(cls: String): Boolean =
         cls.isNotEmpty() &&
@@ -162,6 +228,11 @@ open class DramaAccessibilityService : AccessibilityService() {
             !cls.startsWith("android.app") &&
             !cls.startsWith("android.view") &&
             cls != "android.widget.FrameLayout"
+
+    /** getActivityInfo 反查:确认 pkg/cls 确实是已注册的 Activity(非 Activity 窗口会抛异常) */
+    private fun isRealActivity(pkg: String, cls: String): Boolean = runCatching {
+        packageManager.getActivityInfo(ComponentName(pkg, cls), 0) != null
+    }.getOrDefault(false)
 
     /** 窗口切换(进入新页面 / 播放页):先驱动任务引擎,再留给子类扩展 */
     open fun onWindowChanged(packageName: String, className: String) {
@@ -172,6 +243,15 @@ open class DramaAccessibilityService : AccessibilityService() {
             if (prev != null) taskRunner.onLeftPackage(prev)
         }
         taskRunner.onActivityChanged(packageName, className)
+    }
+
+    /** 任务表变更后按当前前台页面重新评估触发(避免停留在目标页时保存的任务不响应) */
+    fun refreshTaskTriggers() {
+        val cn = lastActivity ?: return
+        val pkg = cn.packageName ?: return
+        lastForegroundPkg = pkg
+        LogStore.log("🔁 任务表变更,按当前页面重新评估触发")
+        taskRunner.onActivityChanged(pkg, cn.className)
     }
 
     /** 最近一次窗口事件的前台包名(onLeftPackage 检测用) */
@@ -215,35 +295,24 @@ open class DramaAccessibilityService : AccessibilityService() {
     fun findNodeByText(text: String): AccessibilityNodeInfo? = findNodeByText { it == text }
 
     /** 按文本查找节点(自定义匹配) */
-    fun findNodeByText(matcher: (String) -> Boolean): AccessibilityNodeInfo? {
-        var result: AccessibilityNodeInfo? = null
-        traverseNodes { node, _ ->
-            val text = readableText(node)
-            if (text != null && matcher(text)) {
-                result = node
-                true
-            } else false
-        }
-        return result
-    }
+    fun findNodeByText(matcher: (String) -> Boolean): AccessibilityNodeInfo? =
+        findFirst { readableText(it)?.let(matcher) == true }
 
     /** 按 resourceId 查找节点 */
-    fun findNodeByResourceId(resourceId: String): AccessibilityNodeInfo? {
-        var result: AccessibilityNodeInfo? = null
-        traverseNodes { node, _ ->
-            if (node.viewIdResourceName == resourceId) {
-                result = node
-                true
-            } else false
-        }
-        return result
-    }
+    fun findNodeByResourceId(resourceId: String): AccessibilityNodeInfo? =
+        findFirst { it.viewIdResourceName == resourceId }
 
     /** 按 className 查找节点 */
-    fun findNodeByClassName(className: String): AccessibilityNodeInfo? {
+    fun findNodeByClassName(className: String): AccessibilityNodeInfo? =
+        findFirst { it.className.toString() == className }
+
+    // ---- 查找基础方法 ----
+
+    /** 基础查找:遍历节点树,返回第一个满足条件的节点 */
+    fun findFirst(predicate: (AccessibilityNodeInfo) -> Boolean): AccessibilityNodeInfo? {
         var result: AccessibilityNodeInfo? = null
         traverseNodes { node, _ ->
-            if (node.className.toString() == className) {
+            if (predicate(node)) {
                 result = node
                 true
             } else false
@@ -251,15 +320,38 @@ open class DramaAccessibilityService : AccessibilityService() {
         return result
     }
 
-    /** 收集所有可点击节点(定位按钮列表) */
-    fun findAllClickableNodes(): List<AccessibilityNodeInfo> {
+    /** 基础查找:遍历节点树,收集所有满足条件的节点 */
+    fun findAll(predicate: (AccessibilityNodeInfo) -> Boolean): List<AccessibilityNodeInfo> {
         val result = ArrayList<AccessibilityNodeInfo>()
         traverseNodes { node, _ ->
-            if (node.isClickable) result += node
+            if (predicate(node)) result += node
             false
         }
         return result
     }
+
+    /** 通用查找节点:条件全部满足即返回第一个匹配节点 */
+    fun findNode(
+        text: String? = null,
+        textContains: String? = null,
+        resourceId: String? = null,
+        className: String? = null,
+        contentDesc: String? = null,
+        clickable: Boolean? = null,
+        extra: ((AccessibilityNodeInfo) -> Boolean)? = null,
+    ): AccessibilityNodeInfo? = findFirst { node ->
+        (text == null || readableText(node) == text) &&
+            (textContains == null || readableText(node)?.contains(textContains) == true) &&
+            (resourceId == null || node.viewIdResourceName == resourceId) &&
+            (className == null || node.className.toString() == className) &&
+            (contentDesc == null || node.contentDescription?.toString() == contentDesc) &&
+            (clickable == null || node.isClickable == clickable) &&
+            (extra == null || extra(node))
+    }
+
+    /** 收集所有可点击节点(定位按钮列表) */
+    fun findAllClickableNodes(): List<AccessibilityNodeInfo> =
+        findAll { it.isClickable }
 
     /** 读取节点可读文本(优先 contentDescription,其次 text) */
     fun readableText(node: AccessibilityNodeInfo): String? =
@@ -268,9 +360,15 @@ open class DramaAccessibilityService : AccessibilityService() {
 
     // ---- 动作 ----
 
-    /** 点击节点 */
-    fun clickNode(node: AccessibilityNodeInfo): Boolean =
-        node.performAction(AccessibilityNodeInfo.ACTION_CLICK)
+    /** 点击节点;节点本身不可点击时向上找最近的可点击祖先(文本子节点直接 click 无效但返回 true) */
+    fun clickNode(node: AccessibilityNodeInfo): Boolean {
+        var target: AccessibilityNodeInfo? = node
+        while (target != null && !target.isClickable) {
+            target = target.parent
+        }
+        target = target ?: node
+        return target.performAction(AccessibilityNodeInfo.ACTION_CLICK)
+    }
 
     /** 点击文本为 [text] 的节点 */
     fun clickByText(text: String): Boolean {
@@ -299,23 +397,28 @@ open class DramaAccessibilityService : AccessibilityService() {
         clickAt(width / 2f, height / 2f)
     }
 
+    /** 通用滑动:指定起终点坐标与时长,基于 gesture 实现 */
+    fun swipe(
+        startX: Float, startY: Float,
+        endX: Float, endY: Float,
+        durationMs: Long = 350L,
+    ) = gesture(startX, startY, endX, endY, durationMs)
+
     /** 上滑(翻页 / 切下一集) */
     fun swipeUp() {
         val (width, height) = screenSize() ?: return
-        gesture(
+        swipe(
             width / 2f, height * 0.75f,
             width / 2f, height * 0.25f,
-            350L,
         )
     }
 
     /** 下滑 */
     fun swipeDown() {
         val (width, height) = screenSize() ?: return
-        gesture(
+        swipe(
             width / 2f, height * 0.25f,
             width / 2f, height * 0.75f,
-            350L,
         )
     }
 
@@ -329,6 +432,19 @@ open class DramaAccessibilityService : AccessibilityService() {
         val description = GestureDescription.Builder().addStroke(stroke).build()
         dispatchGesture(description, null, MAIN)
     }
+
+    // ---- 屏幕旋转保护 ----
+
+    /** 读取当前屏幕旋转设置(0=竖屏锁定);读取失败返回 null */
+    fun userRotation(): Int? = runCatching {
+        android.provider.Settings.System.getInt(contentResolver, android.provider.Settings.System.USER_ROTATION)
+    }.getOrNull()
+
+    /** 恢复屏幕旋转设置;写入需要 WRITE_SECURE_SETTINGS 权限,失败返回 false */
+    fun restoreUserRotation(value: Int): Boolean = runCatching {
+        android.provider.Settings.System.putInt(contentResolver, android.provider.Settings.System.USER_ROTATION, value)
+        true
+    }.getOrDefault(false)
 
     // ---- 全局动作 ----
 
