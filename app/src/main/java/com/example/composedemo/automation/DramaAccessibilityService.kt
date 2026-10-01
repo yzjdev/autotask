@@ -391,6 +391,9 @@ open class DramaAccessibilityService : AccessibilityService() {
     /** 在指定坐标模拟点击 */
     fun clickAt(x: Float, y: Float) = gesture(x, y, x, y, 80L)
 
+    /** 中心点长按:500ms 按压手势 */
+    fun longClickAt(x: Float, y: Float) = gesture(x, y, x, y, 500L)
+
     /** 在屏幕中心模拟点击 */
     fun clickAtCenter() {
         val (width, height) = screenSize() ?: return

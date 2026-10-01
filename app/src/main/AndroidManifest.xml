@@ -75,12 +75,15 @@
         </activity>
 
         <!--
-            崩溃页:由 CrashReporter 在崩溃时通过 startActivity / AlarmManager 拉起。
+            崩溃页:由 CrashReporter 在崩溃时通过 startActivity 拉起。
+            独立 :crash 进程:主进程崩溃退出后崩溃页进程仍存活,
+            复制日志/查看详情不再受主进程死亡影响。
             exported=false,因为它只由本应用进程内部拉起,不需要外部可见;
             若声明为导出,任意第三方都能伪造崩溃页。
         -->
         <activity
             android:name=".crash.CrashActivity"
+            android:process=":crash"
             android:exported="false"
             android:excludeFromRecents="true"
             android:launchMode="singleTask"

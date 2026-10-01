@@ -1,8 +1,6 @@
 package com.example.composedemo.crash
 
-import android.app.AlarmManager
 import android.app.Application
-import android.app.PendingIntent
 import android.content.Context
 import android.content.Intent
 import android.content.SharedPreferences
@@ -15,10 +13,10 @@ import android.util.Log
  * 工作流程:
  * 1. [install] 在 Application.onCreate 注册为线程未捕获异常处理器;
  * 2. 崩溃时先把 [CrashInfo] **同步落盘**(此刻进程还活着,写完就有据可查);
- * 3. 尝试启动 [CrashActivity],让用户看到错误详情而非系统的「应用已停止」;
- * 4. 通过 [restart] 用 AlarmManager 延迟拉起一个**全新进程**运行崩溃页;
- * 5. 最后把异常交给系统默认处理器 —— 这一步不可省略:抛出的异常会替代系统
+ * 3. 尝试启动 [CrashActivity](独立 :crash 进程),让用户看到错误详情而非系统的「应用已停止」;
+ * 4. 最后把异常交给系统默认处理器 —— 这一步不可省略:抛出的异常会替代系统
  *    「应用无响应」对话框,用户最终看到的是本应用的崩溃页。
+ *    不做自动重启:恢复由崩溃页上的「重启应用」按钮触发,避免重启循环。
  *
  * 递归防护:重启后的新进程在 [install] 时检查 [KEY_HAS_PENDING_RESTART],发现是
  * 自己刚拉起的就摘掉处理器,只保留系统默认行为。[CrashActivity] 读取并消费崩溃
@@ -51,9 +49,6 @@ class CrashReporter private constructor(
 
         private const val KEY_LOOP_COUNT = "loop_count"
         private const val KEY_LOOP_FIRST_TS = "loop_first_ts"
-
-        /** 重启延迟:给崩溃页留出被启动的时间,太长则用户卡在空白 */
-        private const val RESTART_DELAY_MS = 3500L
 
         /** 崩溃页只展示「本次」崩溃;超过该时间视为残留,直接丢弃 */
         private const val STALE_REPORT_MS = 120_000L
@@ -190,11 +185,6 @@ class CrashReporter private constructor(
 
         if (shouldShowCrashPage()) {
             launchCrashPage()
-            try {
-                restart()
-            } catch (t: Throwable) {
-                Log.e(TAG, "调度重启失败", t)
-            }
         } else {
             Log.w(TAG, "短时间内崩溃次数过多,跳过崩溃页以避免死循环")
         }
@@ -259,39 +249,6 @@ class CrashReporter private constructor(
         } catch (t: Throwable) {
             Log.e(TAG, "启动崩溃页失败,信息已落盘", t)
         }
-    }
-
-    /**
-     * 用 AlarmManager 延迟拉起一个全新进程。
-     *
-     * 不用 Runtime.exit 直接退出:那样系统会弹「应用无响应」对话框,用户看到的是
-     * 系统错误而非本应用的崩溃页。改用 AlarmManager 投递 PendingIntent,系统会
-     * 先杀掉旧进程再重新拉起,新进程能通过 [KEY_HAS_PENDING_RESTART] 识别自己。
-     */
-    private fun restart() {
-        val intent = Intent(context, CrashActivity::class.java)
-            .setAction(Intent.ACTION_MAIN)
-            .addCategory(Intent.CATEGORY_LAUNCHER)
-            .addFlags(
-                Intent.FLAG_ACTIVITY_NEW_TASK or
-                    Intent.FLAG_ACTIVITY_CLEAR_TASK or
-                    Intent.FLAG_ACTIVITY_RESET_TASK_IF_NEEDED or
-                    Intent.FLAG_ACTIVITY_NO_ANIMATION,
-            )
-
-        val pendingIntent = PendingIntent.getActivity(
-            context,
-            0,
-            intent,
-            PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE,
-        )
-
-        val alarmManager = context.getSystemService(Context.ALARM_SERVICE) as AlarmManager
-        alarmManager.set(
-            AlarmManager.RTC_WAKEUP,
-            System.currentTimeMillis() + RESTART_DELAY_MS,
-            pendingIntent,
-        )
     }
 
     private fun stackTraceToString(throwable: Throwable): String {

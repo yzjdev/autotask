@@ -7,8 +7,10 @@ import android.provider.Settings
 import android.provider.Settings.ACTION_REQUEST_IGNORE_BATTERY_OPTIMIZATIONS
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.BackHandler
+import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.compose.setContent
 import androidx.activity.enableEdgeToEdge
+import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.ExperimentalFoundationApi
 import androidx.compose.foundation.Image
 import androidx.compose.foundation.clickable
@@ -37,6 +39,8 @@ import androidx.compose.foundation.layout.wrapContentWidth
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.material.icons.Icons
+import android.widget.Toast
+import rikka.shizuku.Shizuku
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
 import androidx.compose.material.icons.automirrored.filled.KeyboardArrowRight
 import androidx.compose.material.icons.filled.AccessibilityNew
@@ -46,6 +50,7 @@ import androidx.compose.material.icons.filled.Block
 import androidx.compose.material.icons.filled.Article
 import androidx.compose.material.icons.filled.Language
 import androidx.compose.material.icons.filled.WifiOff
+import androidx.compose.material.icons.filled.Wifi
 import androidx.compose.material.icons.filled.Check
 import androidx.compose.material.icons.filled.Close
 import androidx.compose.material.icons.filled.Home
@@ -55,6 +60,8 @@ import androidx.compose.material.icons.filled.KeyboardBackspace
 import androidx.compose.material.icons.filled.MoreVert
 import androidx.compose.material.icons.filled.Layers
 import androidx.compose.material.icons.filled.GetApp
+import androidx.compose.material.icons.filled.HourglassTop
+import androidx.compose.material.icons.filled.RadioButtonChecked
 import androidx.compose.material.icons.filled.Search
 import androidx.compose.material.icons.filled.Shield
 import androidx.compose.material.icons.filled.BatterySaver
@@ -128,14 +135,13 @@ import com.example.composedemo.automation.DramaAccessibilityService
 import com.example.composedemo.automation.ShizukuShell
 import com.example.composedemo.automation.LogStore
 import com.example.composedemo.automation.NetPolicyStore
-import com.example.composedemo.automation.NodeLocator
-import com.example.composedemo.automation.NodeQuery
-import com.example.composedemo.automation.Step
-import com.example.composedemo.automation.StepCondition
-import com.example.composedemo.automation.Task
+import com.example.composedemo.automation.GkdSelector
+import com.example.composedemo.automation.Action
+import com.example.composedemo.automation.GkdTask
+import com.example.composedemo.automation.GkdSubscription
 import com.example.composedemo.automation.TaskStore
 import com.example.composedemo.automation.label
-import com.example.composedemo.automation.stepsSummary
+import com.example.composedemo.automation.actionsSummary
 import com.example.composedemo.ui.theme.ComposeDemoTheme
 
 class MainActivity : ComponentActivity() {
@@ -177,10 +183,11 @@ fun setRecentsHidden(context: android.content.Context, hidden: Boolean) {
 
 /** 按当前偏好应用排除最近任务(需在 Activity 存活时调用才对本任务生效) */
 private fun applyRecentsHidden(activity: android.app.Activity) {
+    val hidden = isRecentsHidden(activity)
     val am = activity.getSystemService(android.app.ActivityManager::class.java) ?: return
     for (task in am.appTasks) {
         if (task.taskInfo.baseActivity?.packageName == activity.packageName) {
-            task.setExcludeFromRecents(true)
+            task.setExcludeFromRecents(hidden)
         }
     }
 }
@@ -218,7 +225,7 @@ fun AutomationScreen() {
 
     // ---- 应用 tab 共享数据:提升到顶层,切 tab 不销毁、不重新加载 ----
     var tasks by remember { mutableStateOf(TaskStore.loadAll(context.applicationContext)) }
-    fun persistTasks(next: List<Task>) {
+    fun persistTasks(next: List<GkdTask>) {
         tasks = next
         TaskStore.saveAll(context.applicationContext, next)
         DramaAccessibilityService.instance?.taskRunner?.setTasks(next)
@@ -234,8 +241,9 @@ fun AutomationScreen() {
     }
     // 应用 tab UI 状态:同样提升,切 tab 保留搜索;rememberSaveable 兼顾进程重建
     var query by rememberSaveable { mutableStateOf("") }
-    // 应用列表排序模式持久化:0=名称升序,1=名称降序,2=任务数多在前
+    // 应用列表排序模式持久化:0=名称升序,1=名称降序,2=任务数多在前,3=安装时间新在前
     val sortModePrefs = context.getSharedPreferences("apps_ui", android.content.Context.MODE_PRIVATE)
+    var sortMode by rememberSaveable { mutableStateOf(sortModePrefs.getInt("sort_mode", 0)) }
     // 应用/系统应用分段:0 = 用户应用, 1 = 系统应用
     var appTab by rememberSaveable { mutableStateOf(0) }
     // 应用 tab → 任务页导航:null = 停留在应用列表;非空 = 该包名的独立任务页(全屏,隐藏底部导航)
@@ -269,6 +277,9 @@ fun AutomationScreen() {
                 label = labelByPkg[pkg] ?: pkg,
                 taskCount = tasks.count { it.packageName == pkg },
                 isSystem = infos[pkg]?.isSystem ?: false,
+                installTime = runCatching {
+                    context.packageManager.getPackageInfo(pkg, 0).firstInstallTime
+                }.getOrDefault(0L),
             )
         }.sortedBy { it.label.lowercase() }
     }
@@ -342,31 +353,40 @@ fun AutomationScreen() {
         },
     ) { innerPadding ->
         when (tab) {
-            1 -> if (editingRuleId != null) {
-                // 规则编辑页:全屏最顶层
-                RuleEditorPage(
-                    pkg = taskPagePkg ?: "",
-                    existing = tasks.firstOrNull { it.id == editingRuleId },
-                    onSave = { task ->
-                        persistTasks(tasks.filter { it.id != task.id } + task)
-                        editingRuleId = null
-                    },
-                    onBack = { editingRuleId = null },
-                    modifier = Modifier.padding(innerPadding),
-                )
-            } else if (taskPagePkg != null) {
-                TaskListPage(
-                    pkg = taskPagePkg!!,
-                    tasks = tasks,
-                    onBack = { taskPagePkg = null },
-                    onEditTask = { editingRuleId = it },
-                    onNewTask = { editingRuleId = "new_${System.currentTimeMillis()}" },
-                    onToggleTask = { id, enabled ->
-                        persistTasks(tasks.map { if (it.id == id) it.copy(enabled = enabled) else it })
-                    },
-                    onPersistTasks = { persistTasks(it) },
-                    modifier = Modifier.padding(innerPadding),
-                )
+            1 -> if (taskPagePkg != null) {
+                val editId = editingRuleId
+                if (editId != null) {
+                    // 规则编辑页(新建时 existing 为 null)
+                    RuleEditorPage(
+                        pkg = taskPagePkg!!,
+                        existing = tasks.firstOrNull { it.id == editId },
+                        onSave = { saved ->
+                            persistTasks(
+                                if (tasks.any { it.id == saved.id }) {
+                                    tasks.map { if (it.id == saved.id) saved else it }
+                                } else {
+                                    tasks + saved
+                                },
+                            )
+                            editingRuleId = null
+                        },
+                        onBack = { editingRuleId = null },
+                        modifier = Modifier.padding(innerPadding),
+                    )
+                } else {
+                    TaskListPage(
+                        pkg = taskPagePkg!!,
+                        tasks = tasks,
+                        onBack = { taskPagePkg = null },
+                        onToggleTask = { id, enabled ->
+                            persistTasks(tasks.map { if (it.id == id) it.copy(enabled = enabled) else it })
+                        },
+                        onPersistTasks = { persistTasks(it) },
+                        onNewTask = { editingRuleId = "new" },
+                        onEditTask = { editingRuleId = it },
+                        modifier = Modifier.padding(innerPadding),
+                    )
+                }
             } else {
                 AppsScreen(
                     allApps = allApps,
@@ -376,8 +396,11 @@ fun AutomationScreen() {
                     onOpenApp = { taskPagePkg = it },
                     appTab = appTab,
                     onAppTabChange = { appTab = it },
-                    sortMode = sortModePrefs.getInt("sort_mode", 0),
-                    onSortModeChange = { sortModePrefs.edit().putInt("sort_mode", it).apply() },
+                    sortMode = sortMode,
+                    onSortModeChange = {
+                        sortMode = it
+                        sortModePrefs.edit().putInt("sort_mode", it).apply()
+                    },
                     netBlockedPkgs = netBlockedPkgs,
                     onNetworkBlocked = { pkg, blocked ->
                         val cur = netBlockedPkgs.toMutableSet()
@@ -511,11 +534,7 @@ private fun ControlPanel(
     hasSecureSetting: Boolean,
     onToggle: () -> Unit,
 ) {
-    val accent = when {
-        serviceConnected -> MaterialTheme.colorScheme.primary
-        accessibilityEnabled -> MaterialTheme.colorScheme.tertiary
-        else -> MaterialTheme.colorScheme.outline
-    }
+    val accent = if (serviceConnected) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.outline
     Card(
         modifier = Modifier.fillMaxWidth(),
         colors = CardDefaults.cardColors(
@@ -582,11 +601,7 @@ private fun ControlPanel(
             }
             Spacer(modifier = Modifier.height(20.dp))
             Text(
-                text = when {
-                    serviceConnected -> "服务运行中"
-                    accessibilityEnabled -> "服务待连接"
-                    else -> "服务未开启"
-                },
+                text = if (serviceConnected) "服务运行中" else "服务未开启",
                 style = MaterialTheme.typography.titleMedium,
                 fontWeight = FontWeight.Bold,
                 color = MaterialTheme.colorScheme.onSurface,
@@ -595,7 +610,6 @@ private fun ControlPanel(
             Text(
                 text = when {
                     serviceConnected -> "任务可自动执行"
-                    accessibilityEnabled -> "请在无障碍设置中确认开关"
                     !hasSecureSetting -> "点击拨盘自动授权并开启"
                     else -> "点击拨盘开启无障碍服务"
                 },
@@ -714,19 +728,20 @@ private fun StatusDot(active: Boolean, accent: Color, size: Dp = 10.dp) {
 }
 
 /** 包名显示名:直接查已装应用标签,查不到回退包名 */
-private fun appLabel(context: android.content.Context, pkg: String, sample: Task?): String {
+private fun appLabel(context: android.content.Context, pkg: String, sample: GkdTask?): String {
     // 尝试从已装应用解析显示名(缓存成本低,chip 数量有限)
     val pm = context.packageManager
     return runCatching { pm.getApplicationLabel(pm.getApplicationInfo(pkg, 0)).toString() }
         .getOrDefault(pkg)
 }
 
-/** 应用条目:承载 packageName / label / taskCount / isSystem */
+/** 应用条目:承载 packageName / label / taskCount / isSystem / installTime */
 private data class AppRow(
     val packageName: String,
     val label: String,
     val taskCount: Int,
     val isSystem: Boolean,
+    val installTime: Long = 0L,
 )
 
 /** 应用 tab:用户应用 / 系统应用分 tab,标题栏内搜索;点应用进入该应用的独立任务页,长按弹出应用信息抽屉 */
@@ -756,15 +771,20 @@ private fun AppsScreen(
             app.label.contains(query, true) || app.packageName.contains(query, true)
         }
     }
+    // 中文按拼音排序(Collator),否则默认码点序汉字不是字典序
+    val collator = remember { java.text.Collator.getInstance(java.util.Locale.CHINA) }
     // 列表 = 搜索过滤 + 排序 + 按 tab 严格过滤(用户/系统不混排)
     val visibleApps = remember(searchedApps, appTab, sortMode) {
         val filtered = searchedApps.filter { app ->
             (appTab == 1) == app.isSystem
         }
         when (sortMode) {
-            1 -> filtered.sortedByDescending { it.label }
-            2 -> filtered.sortedWith(compareByDescending<AppRow> { it.taskCount }.thenBy { it.label })
-            else -> filtered.sortedBy { it.label }
+            1 -> filtered.sortedWith(compareByDescending(collator) { it.label })
+            2 -> filtered.sortedWith(
+                compareByDescending<AppRow> { it.taskCount }.thenBy(collator) { it.label },
+            )
+            3 -> filtered.sortedByDescending { it.installTime }
+            else -> filtered.sortedWith(compareBy(collator) { it.label })
         }
     }
 
@@ -818,6 +838,11 @@ private fun AppsScreen(
                     onClick = { onSortModeChange(2); sortMenuOpen = false },
                     trailingIcon = { if (sortMode == 2) Icon(Icons.Filled.Check, contentDescription = null, Modifier.size(16.dp)) },
                 )
+                DropdownMenuItem(
+                    text = { Text("按安装时间(新→旧)") },
+                    onClick = { onSortModeChange(3); sortMenuOpen = false },
+                    trailingIcon = { if (sortMode == 3) Icon(Icons.Filled.Check, contentDescription = null, Modifier.size(16.dp)) },
+                )
             }
         }
         }
@@ -864,6 +889,9 @@ private fun AppsScreen(
                     blocked = netBlockedPkgs.contains(app.packageName),
                     onClick = { onOpenApp(app.packageName) },
                     onLongClick = { infoSheetPkg = app.packageName },
+                    onToggleNetwork = { target ->
+                        onNetworkBlocked(app.packageName, target)
+                    },
                 )
             }
         }
@@ -888,11 +916,19 @@ private fun AppListCard(
     blocked: Boolean,
     onClick: () -> Unit,
     onLongClick: () -> Unit,
+    onToggleNetwork: (Boolean) -> Unit,
 ) {
     val accent = if (blocked) MaterialTheme.colorScheme.error else MaterialTheme.colorScheme.primary
+    val context = LocalContext.current
+    // 联网开关本地状态:实际下命令成功后才回调上层;失败回滚
+    var netEnabled by remember(app.packageName) { mutableStateOf(!blocked) }
+    LaunchedEffect(blocked) { netEnabled = !blocked }
+    val scope = rememberCoroutineScope()
     Card(
         modifier = Modifier
             .fillMaxWidth()
+            // 先裁剪再挂点击:水波纹/长按反馈按卡片圆角绘制,而非矩形
+            .clip(MaterialTheme.shapes.large)
             .combinedClickable(
                 onClick = onClick,
                 onLongClick = onLongClick,
@@ -970,18 +1006,45 @@ private fun AppListCard(
                     style = MaterialTheme.typography.bodySmall,
                     color = MaterialTheme.colorScheme.onSurfaceVariant,
                 )
-                // 禁网态:错误色小字提示
-                if (blocked) {
-                    Text(
-                        text = "已断开网络",
-                        style = MaterialTheme.typography.labelSmall,
-                        color = MaterialTheme.colorScheme.error,
-                        fontWeight = FontWeight.Medium,
-                        modifier = Modifier.padding(top = 2.dp),
-                    )
-                }
             }
             Spacer(modifier = Modifier.width(12.dp))
+            // 联网开关:点击直接禁用/启用该应用联网(与长按抽屉同一命令通道)
+            IconButton(
+                onClick = {
+                    // netEnabled = 期望的联网态;setNetworkBlocked/onToggleNetwork 传的是禁网态(取反)
+                    val targetEnabled = !netEnabled
+                    val targetBlocked = !targetEnabled
+                    ensureShizukuForNetwork(
+                        onReady = {
+                            netEnabled = targetEnabled
+                            scope.launch {
+                                val err = withContext(Dispatchers.IO) {
+                                    setNetworkBlocked(app.packageName, targetBlocked)
+                                }
+                                if (err == null) {
+                                    onToggleNetwork(targetBlocked)
+                                } else {
+                                    netEnabled = !targetEnabled
+                                    Toast.makeText(context, "禁网设置失败: $err", Toast.LENGTH_SHORT).show()
+                                }
+                            }
+                        },
+                        onFail = { msg ->
+                            Toast.makeText(context, msg, Toast.LENGTH_SHORT).show()
+                        },
+                    )
+                },
+                modifier = Modifier.size(34.dp),
+            ) {
+                Icon(
+                    imageVector = if (netEnabled) Icons.Filled.Wifi else Icons.Filled.WifiOff,
+                    contentDescription = if (netEnabled) "禁用网络" else "允许联网",
+                    tint = if (netEnabled) MaterialTheme.colorScheme.onSurfaceVariant
+                           else MaterialTheme.colorScheme.error,
+                    modifier = Modifier.size(20.dp),
+                )
+            }
+            Spacer(modifier = Modifier.width(6.dp))
             // 任务数状态点:有任务=强调色,无任务=灰
             StatusDot(active = app.taskCount > 0, accent = accent, size = 9.dp)
         }
@@ -1062,16 +1125,24 @@ private fun AppInfoSheet(
                 desc = "彻底阻断该应用联网(前台+后台,connectivity chain-3,无需 root/VPN,需 Shizuku);重启后自动恢复",
                 checked = disableNetwork,
                 onChange = { target ->
-                    disableNetwork = target
-                    scope.launch {
-                        val ok = withContext(Dispatchers.IO) { setNetworkBlocked(pkg, target) }
-                        if (ok) {
-                            // 实际生效后才通知上层落盘并同步列表角标;失败回滚 UI
-                            onBlockedChange(target)
-                        } else {
-                            disableNetwork = !target
-                        }
-                    }
+                    ensureShizukuForNetwork(
+                        onReady = {
+                            disableNetwork = target
+                            scope.launch {
+                                val err = withContext(Dispatchers.IO) { setNetworkBlocked(pkg, target) }
+                                if (err == null) {
+                                    // 实际生效后才通知上层落盘并同步列表角标;失败回滚 UI
+                                    onBlockedChange(target)
+                                } else {
+                                    disableNetwork = !target
+                                    Toast.makeText(context, "禁网设置失败: $err", Toast.LENGTH_SHORT).show()
+                                }
+                            }
+                        },
+                        onFail = { msg ->
+                            Toast.makeText(context, msg, Toast.LENGTH_SHORT).show()
+                        },
+                    )
                 },
             )
         }
@@ -1084,28 +1155,67 @@ private fun AppInfoSheet(
  * 系统重启后规则清空,由 NetPolicyStore 持久化清单 + restoreNetPolicies 恢复。
  */
 
+/**
+ * 确保禁网操作前 Shizuku 可用:已连接且已授权直接执行 onReady;
+ * 未连接提示启动 Shizuku;未授权直接弹授权申请框,拒绝/失败才回调 onFail。
+ */
+private fun ensureShizukuForNetwork(
+    onReady: () -> Unit,
+    onFail: (String) -> Unit,
+) {
+    val binderReady = try {
+        Shizuku.pingBinder()
+    } catch (_: Throwable) {
+        false
+    }
+    if (!binderReady) {
+        onFail("请先打开 Shizuku 应用,点击「启动」后重试")
+        return
+    }
+    val granted = try {
+        Shizuku.checkSelfPermission() == android.content.pm.PackageManager.PERMISSION_GRANTED
+    } catch (_: Throwable) {
+        false
+    }
+    if (granted) {
+        onReady()
+        return
+    }
+    // 未授权:发起授权申请,结果经监听器异步返回(一次性,收到即注销)
+    try {
+        val listener = object : Shizuku.OnRequestPermissionResultListener {
+            override fun onRequestPermissionResult(requestCode: Int, grantResult: Int) {
+                Shizuku.removeRequestPermissionResultListener(this)
+                if (grantResult == android.content.pm.PackageManager.PERMISSION_GRANTED) {
+                    onReady()
+                } else {
+                    onFail("Shizuku 授权被拒绝,请重新授权后重试")
+                }
+            }
+        }
+        Shizuku.addRequestPermissionResultListener(listener)
+        Shizuku.requestPermission(0)
+    } catch (e: Throwable) {
+        onFail("发起 Shizuku 授权失败:${e.message}")
+    }
+}
+
 /** chain-3 开关:启用防火墙框架;失败返回 false */
 private fun enableChain3(): Boolean =
     ShizukuShell.exec(arrayOf("cmd", "connectivity", "set-chain3-enabled", "true")).ok
 
-/** 查询包名是否已被 chain-3 禁网 */
-private fun queryNetworkBlocked(pkg: String): Boolean {
-    if (!ShizukuShell.isReady()) return false
-    val r = ShizukuShell.exec(arrayOf("cmd", "connectivity", "get-package-networking-enabled", pkg))
-    return r.ok && r.stdout.contains(":deny")
-}
-
-/** 开关包名的联网(内部转 appId);返回是否成功 */
-private fun setNetworkBlocked(pkg: String, blocked: Boolean): Boolean {
-    if (!ShizukuShell.isReady()) return false
-    if (!enableChain3()) return false
+/** 开关包名的联网;返回 null = 成功,否则为失败原因 */
+private fun setNetworkBlocked(pkg: String, blocked: Boolean): String? {
+    if (!ShizukuShell.isReady()) return "Shizuku 未就绪或未授权"
+    if (!enableChain3()) return "chain-3 防火墙启用失败"
     val r = ShizukuShell.exec(
         arrayOf(
             "cmd", "connectivity", "set-package-networking-enabled",
             if (blocked) "false" else "true", pkg,
         )
     )
-    return r.ok && queryNetworkBlocked(pkg) == blocked
+    if (!r.ok) return "命令失败: ${r.stderr.ifBlank { "exit=${r.exitCode}" }}"
+    return null
 }
 
 /**
@@ -1170,12 +1280,12 @@ private fun AppToggleRow(
 @Composable
 private fun TaskListPage(
     pkg: String,
-    tasks: List<Task>,
+    tasks: List<GkdTask>,
     onBack: () -> Unit,
-    onEditTask: (String) -> Unit,
-    onNewTask: () -> Unit,
     onToggleTask: (String, Boolean) -> Unit,
-    onPersistTasks: (List<Task>) -> Unit,
+    onPersistTasks: (List<GkdTask>) -> Unit,
+    onNewTask: () -> Unit,
+    onEditTask: (String) -> Unit,
     modifier: Modifier = Modifier,
 ) {
     val context = LocalContext.current
@@ -1222,12 +1332,82 @@ private fun TaskListPage(
                     color = MaterialTheme.colorScheme.onSurfaceVariant,
                 )
             }
-            Button(
-                onClick = onNewTask,
-                shape = MaterialTheme.shapes.large,
-                colors = ButtonDefaults.buttonColors(containerColor = MaterialTheme.colorScheme.primary),
-            ) {
-                Text("新建任务")
+            // GKD 订阅导入:选择 JSON 文件,规则解析后合并进当前应用的任务列表
+            val scope = rememberCoroutineScope()
+            val importLauncher = rememberLauncherForActivityResult(
+                ActivityResultContracts.OpenDocument(),
+            ) { uri ->
+                if (uri == null) return@rememberLauncherForActivityResult
+                scope.launch {
+                    val text = withContext(Dispatchers.IO) {
+                        runCatching {
+                            context.contentResolver.openInputStream(uri)
+                                ?.bufferedReader()?.use { it.readText() }
+                        }.getOrNull()
+                    }
+                    if (text == null) {
+                        Toast.makeText(context, "读取文件失败", Toast.LENGTH_SHORT).show()
+                        return@launch
+                    }
+                    val result = runCatching { GkdSubscription.parse(text) }.getOrElse {
+                        Toast.makeText(context, "解析失败:${it.message}", Toast.LENGTH_LONG).show()
+                        return@launch
+                    }
+                    if (result.tasks.none { it.packageName == pkg }) {
+                        Toast.makeText(
+                            context,
+                            "文件中没有 ${appName} 的规则" +
+                                result.skipped.takeIf { it.isNotEmpty() }?.joinToString(";") { it }
+                                ?.let { "\n$it" }.orEmpty(),
+                            Toast.LENGTH_LONG,
+                        ).show()
+                        return@launch
+                    }
+                    // 只合并该应用的规则,id 重新生成避免冲突
+                    val merged = tasks + result.tasks
+                        .filter { it.packageName == pkg }
+                        .map { t -> t.copy(id = "task_${System.currentTimeMillis()}_${t.id.hashCode()}") }
+                    onPersistTasks(merged)
+                    Toast.makeText(
+                        context,
+                        "已导入 ${result.tasks.size} 条规则" +
+                            result.skipped.takeIf { it.isNotEmpty() }
+                                ?.joinToString(";") { it }?.let { "\n跳过:$it" }.orEmpty(),
+                        Toast.LENGTH_LONG,
+                    ).show()
+                }
+            }
+            // GKD 订阅导出:把当前应用的规则写成 GKD 订阅 JSON
+            val exportLauncher = rememberLauncherForActivityResult(
+                ActivityResultContracts.CreateDocument("application/json"),
+            ) { uri ->
+                if (uri == null) return@rememberLauncherForActivityResult
+                scope.launch {
+                    val ok = withContext(Dispatchers.IO) {
+                        runCatching {
+                            context.contentResolver.openOutputStream(uri)?.use { out ->
+                                out.write(GkdSubscription.toJson(appTasks, pkg).toByteArray())
+                            } != null
+                        }.getOrDefault(false)
+                    }
+                    Toast.makeText(
+                        context,
+                        if (ok) "已导出 ${appTasks.size} 条规则" else "导出失败",
+                        Toast.LENGTH_SHORT,
+                    ).show()
+                }
+            }
+            IconButton(onClick = { importLauncher.launch(arrayOf("application/json")) }) {
+                Icon(Icons.Filled.GetApp, contentDescription = "导入 GKD 订阅")
+            }
+            IconButton(onClick = {
+                if (appTasks.isEmpty()) {
+                    Toast.makeText(context, "当前应用没有可导出的规则", Toast.LENGTH_SHORT).show()
+                } else {
+                    exportLauncher.launch("gkd-rules-$pkg.json")
+                }
+            }) {
+                Icon(Icons.Filled.Update, contentDescription = "导出 GKD 订阅")
             }
         }
 
@@ -1250,9 +1430,7 @@ private fun TaskListPage(
                 val task = appTasks[i]
                 val accent = if (task.enabled) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.outlineVariant
                 Card(
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .clickable { onEditTask(task.id) },
+                    modifier = Modifier.fillMaxWidth(),
                     colors = CardDefaults.cardColors(
                         containerColor = if (task.enabled) {
                             MaterialTheme.colorScheme.primaryContainer.copy(alpha = 0.35f)
@@ -1271,7 +1449,7 @@ private fun TaskListPage(
                         Spacer(modifier = Modifier.width(12.dp))
                         Column(modifier = Modifier.weight(1f)) {
                             Text(
-                                text = task.stepsSummary(),
+                                text = task.actionsSummary(),
                                 style = MaterialTheme.typography.titleSmall,
                                 fontWeight = FontWeight.SemiBold,
                                 maxLines = 2,
@@ -1279,17 +1457,10 @@ private fun TaskListPage(
                             )
                             Text(
                                 text = buildString {
-                                    task.activityPattern?.let { append("Activity≈$it · ") }
-                                    when (val t = task.trigger) {
-                                        is Task.Trigger.OnPage ->
-                                            append(if (t.once) "仅一次" else "每次进入")
-                                        is Task.Trigger.Loop -> {
-                                            append("循环${t.intervalMs}ms")
-                                            if (t.maxRounds > 0) append("×${t.maxRounds}轮")
-                                        }
-                                    }
-                                    (task.onFailure as? Task.OnFailure.Retry)?.let {
-                                        append(if (it.times < 0) " · 无限重试" else " · 重试${it.times}次")
+                                    if (task.activityIds.isNotEmpty()) append("Activity≈${task.activityIds.first()} · ")
+                                    append(if (task.matches != null) "触发:${task.matches!!.summary()} · " else "页面就绪即触发 · ")
+                                    (task.onFailure as? GkdTask.OnFailure.Retry)?.let {
+                                        append(if (it.times < 0) "无限重试" else "重试${it.times}次")
                                     }
                                 },
                                 style = MaterialTheme.typography.bodySmall,
@@ -1301,6 +1472,10 @@ private fun TaskListPage(
                             checked = task.enabled,
                             onCheckedChange = { onToggleTask(task.id, it) },
                         )
+                        // 编辑
+                        TextButton(onClick = { onEditTask(task.id) }) {
+                            Text("编辑")
+                        }
                         // 删除
                         TextButton(onClick = { onPersistTasks(tasks - task) }) {
                             Text(
@@ -1308,6 +1483,34 @@ private fun TaskListPage(
                                 color = MaterialTheme.colorScheme.error,
                             )
                         }
+                    }
+                }
+            }
+
+            // 新建规则入口
+            item {
+                Surface(
+                    onClick = onNewTask,
+                    modifier = Modifier.fillMaxWidth().height(52.dp),
+                    shape = MaterialTheme.shapes.large,
+                    color = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.45f),
+                ) {
+                    Row(
+                        modifier = Modifier.fillMaxSize(),
+                        horizontalArrangement = Arrangement.Center,
+                        verticalAlignment = Alignment.CenterVertically,
+                    ) {
+                        Icon(
+                            imageVector = Icons.Filled.Add,
+                            contentDescription = null,
+                            modifier = Modifier.size(18.dp),
+                        )
+                        Spacer(modifier = Modifier.width(6.dp))
+                        Text(
+                            "新建规则",
+                            style = MaterialTheme.typography.titleSmall,
+                            fontWeight = FontWeight.SemiBold,
+                        )
                     }
                 }
             }
@@ -1415,106 +1618,45 @@ private fun LogsScreen(modifier: Modifier = Modifier) {
     }
 }
 
-/** 规则编辑页:页面匹配 + 步骤列表(条件 AND 组合 + 动作)+ 执行控制;新建与编辑共用 */
-/** 动作种类元数据:图标 + 名称 + 说明(底部抽屉选择用) */
-private data class ActionKind(
-    val key: String,
-    val label: String,
-    val desc: String,
-    val icon: ImageVector,
+/** 规则编辑页:GKD 规则表单(name / activityIds / matches / action / actionMaximum);新建与编辑共用 */
+
+/** GKD 动作种类(本引擎支持的子集):GKD 动作名 → 中文标签 */
+private val GKD_ACTIONS = listOf(
+    "click" to "点击",
+    "longClick" to "长按",
+    "back" to "返回",
+    "scrollForward" to "上滑",
+    "scrollBackward" to "下滑",
 )
-
-private val ACTION_KINDS = listOf(
-    ActionKind("Click", "点击", "查询到指定节点时点击它", Icons.Filled.TouchApp),
-    ActionKind("Delay", "延时", "固定等待一段时间", Icons.Filled.Timer),
-    ActionKind("Back", "返回", "按一次系统返回键", Icons.Filled.KeyboardBackspace),
-    ActionKind("Swipe", "滑动", "上滑或下滑一屏", Icons.Filled.SwipeVertical),
-)
-
-private fun Step.kindKey(): String = when (this) {
-    is Step.Click -> "Click"
-    is Step.Sleep -> "Delay"
-    is Step.Back -> "Back"
-    is Step.Swipe -> "Swipe"
-}
-
-/** 按动作种类生成默认步骤(添加后立即进入展开编辑) */
-private fun defaultStep(key: String): Step = when (key) {
-    "Delay" -> Step.Sleep()
-    "Back" -> Step.Back()
-    "Swipe" -> Step.Swipe()
-    else -> Step.Click(NodeQuery(groups = listOf(listOf())))
-}
-
-/** 步骤参数摘要(卡片副标题);条件在前,动作参数在后,次数>1 追加 */
-private fun stepParamSummary(step: Step): String {
-    val base = when (step) {
-        is Step.Click -> "查到「${step.query.summary()}」时点击"
-        is Step.Sleep -> "${step.ms / 1000}s"
-        is Step.Back -> "系统返回键"
-        is Step.Swipe -> if (step.up) "向上" else "向下"
-    }
-    // 点击语义已含"查到才点",不再拼条件前缀
-    val cond = if (step is Step.Click) "" else step.condition?.let { "${it.summary()} 时," } ?: ""
-    val times = when {
-        step.repeat > 1 -> " ×${step.repeat}"
-        step.repeat == 0 -> " ×不限"
-        else -> ""
-    }
-    return "$cond$base$times"
-}
 
 @Composable
 private fun RuleEditorPage(
     pkg: String,
-    existing: Task?,
-    onSave: (Task) -> Unit,
+    existing: GkdTask?,
+    onSave: (GkdTask) -> Unit,
     onBack: () -> Unit,
     modifier: Modifier = Modifier,
 ) {
     val context = androidx.compose.ui.platform.LocalContext.current
-    var steps by remember { mutableStateOf(existing?.steps ?: emptyList<Step>()) }
-    // 失败策略:整组重试 / 直接停止
-    var onFailureStop by remember { mutableStateOf(existing?.onFailure is Task.OnFailure.Stop) }
-    var retryTimes by remember {
-        val t = (existing?.onFailure as? Task.OnFailure.Retry)?.times
-        mutableStateOf(if (t == -1) "3" else (t ?: 3).toString())
+    // GKD 规则字段:name / activityIds / matches / action / actionMaximum
+    // 一条规则 = 一个动作(GKD 语义):matches 命中的节点即动作目标
+    var name by remember { mutableStateOf(existing?.name.orEmpty()) }
+    var activityIdsText by remember {
+        mutableStateOf(existing?.activityIds?.joinToString(",").orEmpty())
     }
-    // 无限重试:times = -1
-    var retryInfinite by remember {
-        mutableStateOf((existing?.onFailure as? Task.OnFailure.Retry)?.times == -1)
-    }
-    // 触发方式:0=仅一次 1=每次进入 2=循环
-    var triggerMode by remember {
+    var matchesExpr by remember { mutableStateOf(existing?.matches?.summary().orEmpty()) }
+    // GKD 动作名
+    var actionKind by remember {
         mutableStateOf(
-            when (val t = existing?.trigger) {
-                null -> 0
-                is Task.Trigger.Loop -> 2
-                is Task.Trigger.OnPage -> if (t.once) 0 else 1
-            }
+            when (val a = existing?.actions?.firstOrNull()) {
+                is Action.LongClick -> "longClick"
+                is Action.Back -> "back"
+                is Action.Swipe -> if (a.up) "scrollForward" else "scrollBackward"
+                else -> "click"
+            },
         )
     }
-    var loopIntervalSec by remember {
-        val s = (existing?.trigger as? Task.Trigger.Loop)?.intervalMs
-        mutableStateOf(((s ?: 3000) / 1000).toString())
-    }
-    var loopRounds by remember {
-        mutableStateOf(((existing?.trigger as? Task.Trigger.Loop)?.maxRounds ?: 0).toString())
-    }
-    // 展开编辑中的步骤下标;null = 全部收起
-    var expandedIndex by remember { mutableStateOf<Int?>(null) }
-    // 底部抽屉:选择要添加的动作
-    var showPicker by remember { mutableStateOf(false) }
-
-    fun move(i: Int, delta: Int) {
-        val j = i + delta
-        if (j !in steps.indices) return
-        val n = steps.toMutableList()
-        val s = n.removeAt(i)
-        n.add(j, s)
-        steps = n
-        if (expandedIndex == i) expandedIndex = j
-    }
+    var actionMax by remember { mutableStateOf((existing?.actions?.firstOrNull()?.repeat ?: 1).toString()) }
 
     Column(modifier = modifier.fillMaxSize()) {
         // 顶栏:强调色返回圆钮 + 标题 + 保存
@@ -1549,623 +1691,124 @@ private fun RuleEditorPage(
             }
             TextButton(
                 onClick = {
-                    val onFailure = if (onFailureStop) Task.OnFailure.Stop
-                    else if (retryInfinite) Task.OnFailure.Retry(times = -1)
-                    else Task.OnFailure.Retry(times = (retryTimes.toIntOrNull() ?: 3).coerceAtLeast(1))
-                    val trigger = when (triggerMode) {
-                        1 -> Task.Trigger.OnPage(once = false)
-                        2 -> Task.Trigger.Loop(
-                            intervalMs = (loopIntervalSec.toLongOrNull() ?: 3).coerceAtLeast(1) * 1000,
-                            maxRounds = (loopRounds.toIntOrNull() ?: 0).coerceAtLeast(0),
-                        )
-                        else -> Task.Trigger.OnPage(once = true)
+                    // 解析 GKD 选择器;语法错误不允许保存
+                    val sel = matchesExpr.trim().takeIf { it.isNotEmpty() }?.let {
+                        runCatching { GkdSelector.parse(it) }.getOrNull()
                     }
-                    onSave(
-                        Task(
-                            id = existing?.id ?: "task_${System.currentTimeMillis()}",
-                            name = existing?.name ?: "任务 ${steps.size} 步",
-                            packageName = pkg,
-                            activityPattern = existing?.activityPattern,
-                            enabled = existing?.enabled ?: true,
-                            trigger = trigger,
-                            steps = steps,
-                            onFailure = onFailure,
-                        )
+                    if (matchesExpr.isNotBlank() && sel == null) {
+                        Toast.makeText(context, "选择器语法错误", Toast.LENGTH_SHORT).show()
+                        return@TextButton
+                    }
+                    val repeat = (actionMax.toIntOrNull() ?: 1).coerceAtLeast(1)
+                    val action: Action = when (actionKind) {
+                        "longClick" -> Action.LongClick(matches = sel ?: GkdSelector(), repeat = repeat)
+                        "back" -> Action.Back(repeat = repeat)
+                        "scrollForward" -> Action.Swipe(up = true, repeat = repeat)
+                        "scrollBackward" -> Action.Swipe(up = false, repeat = repeat)
+                        else -> Action.Click(matches = sel ?: GkdSelector(), repeat = repeat)
+                    }
+                    val saved = GkdTask(
+                        id = existing?.id ?: "task_${System.currentTimeMillis()}",
+                        name = name.trim().ifEmpty { action.label() },
+                        packageName = pkg,
+                        activityIds = activityIdsText.split(',', '，')
+                            .map { it.trim() }.filter { it.isNotEmpty() },
+                        enabled = existing?.enabled ?: true,
+                        matches = sel,
+                        actions = listOf(action),
+                        onFailure = existing?.onFailure ?: GkdTask.OnFailure.Retry(),
                     )
-                    android.widget.Toast.makeText(
-                        context, "任务已保存", android.widget.Toast.LENGTH_SHORT,
-                    ).show()
+                    onSave(saved)
+                    Toast.makeText(context, "规则已保存", Toast.LENGTH_SHORT).show()
                 },
-                enabled = steps.isNotEmpty(),
+                enabled = true,
                 shape = MaterialTheme.shapes.large,
                 colors = ButtonDefaults.buttonColors(containerColor = MaterialTheme.colorScheme.primary),
             ) { Text("保存") }
         }
 
-        LazyColumn(
-            modifier = Modifier.fillMaxSize(),
-            contentPadding = PaddingValues(start = 16.dp, end = 16.dp, bottom = 32.dp),
-            verticalArrangement = Arrangement.spacedBy(8.dp),
+        // GKD 规则表单:一条规则 = 一个动作
+        Column(
+            modifier = Modifier
+                .fillMaxSize()
+                .verticalScroll(rememberScrollState())
+                .padding(horizontal = 16.dp, vertical = 8.dp),
+            verticalArrangement = Arrangement.spacedBy(12.dp),
         ) {
-            // 步骤卡片流
-            item {
-                Text(
-                    text = "执行步骤",
-                    style = MaterialTheme.typography.titleSmall,
-                    fontWeight = FontWeight.SemiBold,
-                    modifier = Modifier.padding(top = 4.dp),
-                )
-            }
-            if (steps.isEmpty()) {
-                item {
-                    Text(
-                        text = "还没有步骤,点下方「添加步骤」开始。",
-                        style = MaterialTheme.typography.bodySmall,
-                        color = MaterialTheme.colorScheme.onSurfaceVariant,
-                    )
-                }
-            }
-            items(steps.size) { i ->
-                StepCard(
-                    index = i,
-                    step = steps[i],
-                    expanded = expandedIndex == i,
-                    canMoveDown = i < steps.size - 1,
-                    onToggle = { expandedIndex = if (expandedIndex == i) null else i },
-                    onMove = { delta -> move(i, delta) },
-                    onDelete = {
-                        steps = steps.filterIndexed { idx, _ -> idx != i }
-                        if (expandedIndex == i) expandedIndex = null
-                        else if (expandedIndex != null && expandedIndex!! > i) expandedIndex = expandedIndex!! - 1
-                    },
-                    onSave = { s ->
-                        steps = steps.toMutableList().also { it[i] = s }
-                        expandedIndex = null
-                    },
-                )
-            }
-            item {
-                OutlinedButton(
-                    onClick = { showPicker = true },
-                    modifier = Modifier.fillMaxWidth(),
-                ) {
-                    Icon(Icons.Filled.Add, contentDescription = null, modifier = Modifier.size(18.dp))
-                    Spacer(Modifier.width(6.dp))
-                    Text("添加步骤")
-                }
-            }
-
-            // 触发方式 + 失败策略
-            item {
-                Card(modifier = Modifier.fillMaxWidth()) {
-                    Column(
-                        modifier = Modifier.padding(12.dp),
-                        verticalArrangement = Arrangement.spacedBy(8.dp),
-                    ) {
-                        Text(
-                            text = "触发方式",
-                            style = MaterialTheme.typography.titleSmall,
-                            fontWeight = FontWeight.SemiBold,
-                        )
-                        Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                            FilterChip(
-                                selected = triggerMode == 0,
-                                onClick = { triggerMode = 0 },
-                                label = { Text("仅一次") },
-                            )
-                            FilterChip(
-                                selected = triggerMode == 1,
-                                onClick = { triggerMode = 1 },
-                                label = { Text("每次进入") },
-                            )
-                            FilterChip(
-                                selected = triggerMode == 2,
-                                onClick = { triggerMode = 2 },
-                                label = { Text("循环") },
-                            )
-                        }
-                        if (triggerMode == 2) {
-                            Row(
-                                modifier = Modifier.fillMaxWidth(),
-                                horizontalArrangement = Arrangement.spacedBy(8.dp),
-                            ) {
-                                OutlinedTextField(
-                                    value = loopIntervalSec,
-                                    onValueChange = { loopIntervalSec = it.filter { c -> c.isDigit() } },
-                                    label = { Text("间隔(秒)") },
-                                    singleLine = true,
-                                    modifier = Modifier.weight(1f),
-                                )
-                                OutlinedTextField(
-                                    value = loopRounds,
-                                    onValueChange = { loopRounds = it.filter { c -> c.isDigit() } },
-                                    label = { Text("轮数(0=不限)") },
-                                    singleLine = true,
-                                    modifier = Modifier.weight(1f),
-                                )
-                            }
-                        }
-                        HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant)
-                        Text(
-                            text = "失败时",
-                            style = MaterialTheme.typography.titleSmall,
-                            fontWeight = FontWeight.SemiBold,
-                        )
-                        Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                            FilterChip(
-                                selected = !onFailureStop && !retryInfinite,
-                                onClick = { onFailureStop = false; retryInfinite = false },
-                                label = { Text("整组重试") },
-                            )
-                            FilterChip(
-                                selected = !onFailureStop && retryInfinite,
-                                onClick = { onFailureStop = false; retryInfinite = true },
-                                label = { Text("无限") },
-                            )
-                            FilterChip(
-                                selected = onFailureStop,
-                                onClick = { onFailureStop = true },
-                                label = { Text("停止任务") },
-                            )
-                        }
-                        // 仅「整组重试」模式下显示次数输入
-                        if (!onFailureStop && !retryInfinite) {
-                            OutlinedTextField(
-                                value = retryTimes,
-                                onValueChange = { retryTimes = it.filter { c -> c.isDigit() } },
-                                label = { Text("重试次数") },
-                                singleLine = true,
-                                modifier = Modifier.fillMaxWidth(),
-                            )
-                        }
-                    }
-                }
-            }
-        }
-    }
-
-    // 底部抽屉:选择要添加的动作
-    if (showPicker) {
-        ActionPickerSheet(
-            onPick = { kind ->
-                showPicker = false
-                steps = steps + defaultStep(kind.key)
-                expandedIndex = steps.size - 1
-            },
-            onDismiss = { showPicker = false },
-        )
-    }
-}
-
-private fun mode(contains: Boolean) =
-    if (contains) NodeLocator.MatchMode.CONTAINS else NodeLocator.MatchMode.EQUALS
-
-/** 条件输入行:值 + 匹配方式切换(等于/包含) */
-@Composable
-private fun CondRow(
-    label: String,
-    value: String,
-    contains: Boolean,
-    onChange: (String, Boolean) -> Unit,
-    hint: String,
-) {
-    Row(
-        modifier = Modifier.fillMaxWidth(),
-        verticalAlignment = Alignment.CenterVertically,
-        horizontalArrangement = Arrangement.spacedBy(6.dp),
-    ) {
-        OutlinedTextField(
-            value = value,
-            onValueChange = { onChange(it, contains) },
-            label = { Text("$label($hint)") },
-            singleLine = true,
-            modifier = Modifier.weight(1f),
-        )
-        TextButton(onClick = { onChange(value, !contains) }) {
-            Text(if (contains) "包含" else "等于")
-        }
-    }
-}
-
-/** 单个步骤卡片:收起时显示图标+摘要,展开后就地编辑参数 */
-@Composable
-private fun StepCard(
-    index: Int,
-    step: Step,
-    expanded: Boolean,
-    canMoveDown: Boolean,
-    onToggle: () -> Unit,
-    onMove: (Int) -> Unit,
-    onDelete: () -> Unit,
-    onSave: (Step) -> Unit,
-) {
-    val kind = ACTION_KINDS.first { it.key == step.kindKey() }
-    Card(modifier = Modifier.fillMaxWidth()) {
-        Column(modifier = Modifier.padding(12.dp)) {
-            // 收起态:图标+标题+摘要+操作按钮,整行点击切换展开
-            Row(
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .clickable(onClick = onToggle),
-                verticalAlignment = Alignment.CenterVertically,
-                horizontalArrangement = Arrangement.spacedBy(10.dp),
-            ) {
-                Icon(
-                    imageVector = kind.icon,
-                    contentDescription = null,
-                    tint = MaterialTheme.colorScheme.primary,
-                    modifier = Modifier.size(20.dp),
-                )
-                Column(modifier = Modifier.weight(1f)) {
-                    Text(
-                        text = "${index + 1}. ${kind.label}",
-                        style = MaterialTheme.typography.bodyMedium,
-                        fontWeight = FontWeight.Medium,
-                    )
-                    Text(
-                        text = stepParamSummary(step),
-                        style = MaterialTheme.typography.bodySmall,
-                        color = MaterialTheme.colorScheme.onSurfaceVariant,
-                        maxLines = 2,
-                        overflow = TextOverflow.Ellipsis,
-                    )
-                }
-                IconButton(onClick = { onMove(-1) }, enabled = index > 0) {
-                    Icon(Icons.Filled.KeyboardArrowUp, contentDescription = "上移")
-                }
-                IconButton(onClick = { onMove(1) }, enabled = canMoveDown) {
-                    Icon(Icons.Filled.KeyboardArrowDown, contentDescription = "下移")
-                }
-                IconButton(onClick = onDelete) {
-                    Icon(Icons.Filled.Close, contentDescription = "删除")
-                }
-            }
-            // 展开态:就地编辑表单
-            if (expanded) {
-                StepEditForm(initial = step, onSave = onSave)
-            }
-        }
-    }
-}
-
-/** 步骤参数就地编辑表单(卡片内展开):条件 + 动作参数 + 次数,保存时保留原 id */
-@Composable
-private fun StepEditForm(
-    initial: Step,
-    onSave: (Step) -> Unit,
-) {
-    var delaySec by remember { mutableStateOf((((initial as? Step.Sleep)?.ms ?: 1000L) / 1000).toString()) }
-    var swipeUp by remember { mutableStateOf((initial as? Step.Swipe)?.up ?: true) }
-    // 条件标签序列(点击目标与执行条件共用)
-    var terms by remember {
-        mutableStateOf(
-            when {
-                initial is Step.Click -> initial.query.toTerms()
-                initial.condition != null -> initial.condition!!.query.toTerms()
-                else -> emptyList<Term>()
-            }
-        )
-    }
-    // 非点击动作的条件门槛:未启用 / 要求命中 / 要求不命中
-    var condMode by remember {
-        mutableStateOf(
-            when {
-                initial is Step.Click -> 1  // 点击恒为「查到才点」
-                initial.condition == null -> 0
-                initial.condition!!.expectPresent -> 1
-                else -> 2
-            }
-        )
-    }
-    // 执行次数:0 = 不限,必须原样回显(coerceAtLeast(1) 会把「不限」破坏成 1)
-    var repeatN by remember { mutableStateOf(initial.repeat.toString()) }
-
-    val valid = true
-
-    Column(
-        modifier = Modifier.padding(top = 8.dp),
-        verticalArrangement = Arrangement.spacedBy(8.dp),
-    ) {
-        HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant)
-        // 点击:查询到节点才点,条件即目标
-        if (initial is Step.Click) {
-            Text(
-                text = "查询到以下节点时点击",
-                style = MaterialTheme.typography.bodySmall,
-                color = MaterialTheme.colorScheme.onSurfaceVariant,
-            )
-            TermEditor(terms = terms, onChange = { terms = it })
-        }
-        when (initial) {
-            is Step.Sleep -> OutlinedTextField(
-                value = delaySec,
-                onValueChange = { delaySec = it.filter { c -> c.isDigit() } },
-                label = { Text("延时(秒)") },
+            OutlinedTextField(
+                value = name,
+                onValueChange = { name = it },
+                label = { Text("规则名(可选)") },
                 singleLine = true,
                 modifier = Modifier.fillMaxWidth(),
             )
-            is Step.Swipe -> Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                FilterChip(selected = swipeUp, onClick = { swipeUp = true }, label = { Text("上滑") })
-                FilterChip(selected = !swipeUp, onClick = { swipeUp = false }, label = { Text("下滑") })
-            }
-            else -> {}
-        }
-
-        // 执行次数
-        OutlinedTextField(
-            value = repeatN,
-            onValueChange = { repeatN = it.filter { c -> c.isDigit() } },
-            label = { Text("执行次数(默认 1,0/留空=不限)") },
-            singleLine = true,
-            modifier = Modifier.fillMaxWidth(),
-        )
-
-        // 条件门槛(点击已用上方标签,不再重复)
-        if (initial !is Step.Click) {
+            OutlinedTextField(
+                value = activityIdsText,
+                onValueChange = { activityIdsText = it },
+                label = { Text("activityIds(逗号分隔,留空 = 任意)") },
+                singleLine = true,
+                modifier = Modifier.fillMaxWidth(),
+            )
+            SelectorExprField(
+                value = matchesExpr,
+                onChange = { matchesExpr = it },
+                label = "matches(GKD 选择器,命中即动作目标)",
+                hint = "例: [text*=\"跳过\"][clickable=true];back/scroll 类动作留空 = 页面就绪即执行",
+            )
             Text(
-                text = "执行条件(可选)",
+                text = "action",
+                style = MaterialTheme.typography.titleSmall,
+                fontWeight = FontWeight.SemiBold,
+            )
+            // GKD 动作种类(click/longClick/back/scrollForward/scrollBackward)
+            Row(
+                modifier = Modifier.horizontalScroll(rememberScrollState()),
+                horizontalArrangement = Arrangement.spacedBy(8.dp),
+            ) {
+                GKD_ACTIONS.forEach { k ->
+                    FilterChip(
+                        selected = actionKind == k.first,
+                        onClick = { actionKind = k.first },
+                        label = { Text(k.second) },
+                    )
+                }
+            }
+            OutlinedTextField(
+                value = actionMax,
+                onValueChange = { actionMax = it.filter { c -> c.isDigit() } },
+                label = { Text("actionMaximum(执行次数)") },
+                singleLine = true,
+                modifier = Modifier.fillMaxWidth(),
+            )
+            Text(
+                text = "GKD 语义:matches 命中的节点即动作目标;back / scrollForward / scrollBackward 为全局动作,无需选择器。",
                 style = MaterialTheme.typography.bodySmall,
                 color = MaterialTheme.colorScheme.onSurfaceVariant,
             )
-            Row(
-                modifier = Modifier.horizontalScroll(rememberScrollState()),
-                horizontalArrangement = Arrangement.spacedBy(6.dp),
-            ) {
-                listOf(0 to "无条件", 1 to "节点存在时", 2 to "节点不存在时").forEach { (m, label) ->
-                    FilterChip(
-                        selected = condMode == m,
-                        onClick = { condMode = m },
-                        label = { Text(label) },
-                    )
-                }
-            }
-            if (condMode != 0) {
-                TermEditor(terms = terms, onChange = { terms = it })
-            }
-        }
-
-        Row(
-            modifier = Modifier.fillMaxWidth(),
-            horizontalArrangement = Arrangement.End,
-            verticalAlignment = Alignment.CenterVertically,
-        ) {
-            // 点击动作必须至少有一个有效条件,否则点击无从谈起;显式禁用并提示,避免"点了没反应"
-            val canSave = initial !is Step.Click || terms.toQuery() != null
-            if (!canSave) {
-                Text(
-                    text = "点击动作需至少设置一个查询条件",
-                    style = MaterialTheme.typography.bodySmall,
-                    color = MaterialTheme.colorScheme.error,
-                )
-            }
-            TextButton(
-                enabled = canSave,
-                onClick = {
-                    // 同类型就地编辑,保留原 id;其余动作可无条件
-                    val query = terms.toQuery()
-                    val condition = if (condMode == 0 || query == null) null
-                    else StepCondition(query, expectPresent = condMode == 1)
-                    // 0 或空 = 不限次数
-                    val repeat = (repeatN.toIntOrNull() ?: 0).coerceAtLeast(0)
-                    onSave(
-                        when (initial) {
-                            is Step.Click -> Step.Click(query!!, condition, repeat, initial.id)
-                            is Step.Sleep -> Step.Sleep((delaySec.toLongOrNull() ?: 1).coerceAtLeast(0) * 1000, condition, repeat, initial.id)
-                            is Step.Swipe -> Step.Swipe(swipeUp, condition, repeat, initial.id)
-                            is Step.Back -> Step.Back(condition, repeat, initial.id)
-                        }
-                    )
-                },
-            ) { Text("完成") }
         }
     }
 }
 
-/** 标签化条件编辑器的一个词条:断言或连接符 */
-private sealed interface Term {
-    /** 断言:字段 + 是否不等于 + 值 */
-    data class Assert(
-        val field: NodeQuery.Assertion.Field,
-        val neq: Boolean,
-        val value: String,
-    ) : Term
-
-    /** 连接符:true=且(&) false=或(|) */
-    data class Link(val and: Boolean) : Term
-}
-
-private fun fieldName(f: NodeQuery.Assertion.Field): String = when (f) {
-    NodeQuery.Assertion.Field.TEXT -> "文本"
-    NodeQuery.Assertion.Field.VID -> "vid"
-    NodeQuery.Assertion.Field.DESC -> "描述"
-    NodeQuery.Assertion.Field.VISIBLE -> "可见性"
-}
-
-private fun fieldValueHint(f: NodeQuery.Assertion.Field): String = when (f) {
-    NodeQuery.Assertion.Field.TEXT -> "节点文本"
-    NodeQuery.Assertion.Field.VID -> "如 btn_play(不含包名)"
-    NodeQuery.Assertion.Field.DESC -> "contentDescription"
-    NodeQuery.Assertion.Field.VISIBLE -> "true / false"
-}
-
-/** NodeQuery → 标签序列:组间为「或」,组内为「且」 */
-private fun NodeQuery.toTerms(): List<Term> {
-    val out = mutableListOf<Term>()
-    groups.forEachIndexed { gi, group ->
-        if (gi > 0) out += Term.Link(false)
-        group.forEachIndexed { ai, a ->
-            if (ai > 0) out += Term.Link(true)
-            out += Term.Assert(a.field, a.op == NodeQuery.Assertion.Op.NEQ, a.value)
-        }
-    }
-    return out
-}
-
-/** 标签序列 → NodeQuery;无有效断言返回 null */
-private fun List<Term>.toQuery(): NodeQuery? {
-    val groups = mutableListOf<MutableList<NodeQuery.Assertion>>(mutableListOf())
-    for (t in this) when (t) {
-        is Term.Assert -> groups.last() += NodeQuery.Assertion(
-            t.field,
-            if (t.neq) NodeQuery.Assertion.Op.NEQ else NodeQuery.Assertion.Op.EQ,
-            t.value.trim(),
-        )
-        is Term.Link -> if (!t.and) groups.add(mutableListOf())
-    }
-    val valid = groups.filter { it.isNotEmpty() }
-    return if (valid.isEmpty()) null else NodeQuery(valid)
-}
-
-/**
- * 标签化条件编辑器:断言/连接符均以标签展示。
- * 点断言标签 → 下方展开编辑(值输入 + =/!= 切换 + 删除);点连接符标签 → 在 且/或 间切换;
- * 快捷 chips 追加新断言(已有条件时自动补「且」)。
- */
+/** GKD 选择器表达式输入框:实时校验语法,错误时标红提示 */
 @Composable
-private fun TermEditor(
-    terms: List<Term>,
-    onChange: (List<Term>) -> Unit,
+private fun SelectorExprField(
+    value: String,
+    onChange: (String) -> Unit,
+    label: String,
+    hint: String,
 ) {
-    var selected by remember { mutableStateOf<Int?>(null) }
-
-    Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
-        // 标签行:断言 + 连接符
-        if (terms.isNotEmpty()) {
-            Row(
-                modifier = Modifier.horizontalScroll(rememberScrollState()),
-                horizontalArrangement = Arrangement.spacedBy(6.dp),
-                verticalAlignment = Alignment.CenterVertically,
-            ) {
-                terms.forEachIndexed { i, t ->
-                    when (t) {
-                        is Term.Assert -> FilterChip(
-                            selected = selected == i,
-                            onClick = { selected = if (selected == i) null else i },
-                            label = {
-                                Text(
-                                    fieldName(t.field) +
-                                        (if (t.neq) "≠" else "=") +
-                                        t.value.ifEmpty { "…" }
-                                )
-                            },
-                        )
-                        is Term.Link -> OutlinedButton(
-                            onClick = {
-                                onChange(terms.toMutableList().also { it[i] = t.copy(and = !t.and) })
-                            },
-                            contentPadding = PaddingValues(horizontal = 10.dp),
-                        ) { Text(if (t.and) "且" else "或") }
-                    }
-                }
-            }
-        }
-        // 快捷选择:追加断言(字段 chip,选中即添加并展开编辑)
-        Row(
-            modifier = Modifier.horizontalScroll(rememberScrollState()),
-            horizontalArrangement = Arrangement.spacedBy(6.dp),
-        ) {
-            listOf(
-                NodeQuery.Assertion.Field.TEXT to "文本",
-                NodeQuery.Assertion.Field.VID to "vid",
-                NodeQuery.Assertion.Field.DESC to "描述",
-                NodeQuery.Assertion.Field.VISIBLE to "可见性",
-            ).forEach { (f, label) ->
-                FilterChip(
-                    selected = false,
-                    onClick = {
-                        val ns = terms.toMutableList()
-                        if (ns.isNotEmpty()) ns += Term.Link(true)
-                        ns += Term.Assert(f, neq = false, value = "")
-                        onChange(ns)
-                        selected = ns.size - 1
-                    },
-                    label = { Text(label) },
-                )
-            }
-        }
-        // 选中断言的编辑面板:值 + 运算符 + 删除
-        selected?.let { i ->
-            (terms.getOrNull(i) as? Term.Assert)?.let { a ->
-                Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
-                    Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                        FilterChip(
-                            selected = !a.neq,
-                            onClick = { onChange(terms.toMutableList().also { it[i] = a.copy(neq = false) }) },
-                            label = { Text("= 等于") },
-                        )
-                        FilterChip(
-                            selected = a.neq,
-                            onClick = { onChange(terms.toMutableList().also { it[i] = a.copy(neq = true) }) },
-                            label = { Text("!= 不等于") },
-                        )
-                    }
-                    OutlinedTextField(
-                        value = a.value,
-                        onValueChange = { v ->
-                            onChange(terms.toMutableList().also { it[i] = a.copy(value = v) })
-                        },
-                        label = { Text(fieldName(a.field)) },
-                        supportingText = { Text(fieldValueHint(a.field)) },
-                        singleLine = true,
-                        modifier = Modifier.fillMaxWidth(),
-                    )
-                    TextButton(onClick = {
-                        onChange(terms.toMutableList().also { it.removeAt(i) })
-                        selected = null
-                    }) { Text("删除该条件") }
-                }
-            }
-        }
+    val error = value.trim().takeIf { it.isNotEmpty() }?.let { expr ->
+        runCatching { GkdSelector.parse(expr) }.exceptionOrNull()?.message
     }
-}
-
-/** 底部抽屉:选择要添加的动作种类 */
-@OptIn(ExperimentalMaterial3Api::class)
-@Composable
-private fun ActionPickerSheet(
-    onPick: (ActionKind) -> Unit,
-    onDismiss: () -> Unit,
-) {
-    ModalBottomSheet(onDismissRequest = onDismiss) {
-        Column(
-            modifier = Modifier
-                .fillMaxWidth()
-                .padding(horizontal = 16.dp)
-                .padding(bottom = 24.dp),
-            verticalArrangement = Arrangement.spacedBy(4.dp),
-        ) {
-            Text(
-                text = "添加步骤",
-                style = MaterialTheme.typography.titleMedium,
-                fontWeight = FontWeight.SemiBold,
-                modifier = Modifier.padding(bottom = 8.dp, start = 4.dp),
-            )
-            ACTION_KINDS.forEach { kind ->
-                Row(
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .clickable { onPick(kind) }
-                        .padding(vertical = 12.dp, horizontal = 4.dp),
-                    verticalAlignment = Alignment.CenterVertically,
-                    horizontalArrangement = Arrangement.spacedBy(12.dp),
-                ) {
-                    Icon(
-                        imageVector = kind.icon,
-                        contentDescription = null,
-                        tint = MaterialTheme.colorScheme.primary,
-                    )
-                    Column {
-                        Text(text = kind.label, style = MaterialTheme.typography.bodyLarge)
-                        Text(
-                            text = kind.desc,
-                            style = MaterialTheme.typography.bodySmall,
-                            color = MaterialTheme.colorScheme.onSurfaceVariant,
-                        )
-                    }
-                }
-            }
-        }
-    }
+    OutlinedTextField(
+        value = value,
+        onValueChange = onChange,
+        label = { Text(label) },
+        isError = error != null,
+        supportingText = { Text(error ?: hint) },
+        singleLine = true,
+        modifier = Modifier.fillMaxWidth(),
+    )
 }
 
 /** 顶部标题 */

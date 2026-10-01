@@ -646,9 +646,9 @@ class OverlayDebugWindow(private val service: AccessibilityService) {
                     minimumHeight = dp(22)
                     isClickable = true
                     isLongClickable = true
-                    // 长按复制「属性名: 值」
+                    // 长按复制属性值
                     setOnLongClickListener {
-                        copyToClipboard("$name: $value")
+                        copyToClipboard(value)
                         it.animate().alpha(0.4f).setDuration(80)
                             .withEndAction { it.animate().alpha(1f).setDuration(120) }
                         true
@@ -690,7 +690,7 @@ class OverlayDebugWindow(private val service: AccessibilityService) {
     private fun copyToClipboard(text: String) {
         val cm = service.getSystemService(android.content.ClipboardManager::class.java)
         cm.setPrimaryClip(android.content.ClipData.newPlainText("node", text))
-        android.widget.Toast.makeText(service, "已复制: $text", android.widget.Toast.LENGTH_SHORT).show()
+        android.widget.Toast.makeText(service, text, android.widget.Toast.LENGTH_SHORT).show()
     }
 
     /** 上:父节点 */
