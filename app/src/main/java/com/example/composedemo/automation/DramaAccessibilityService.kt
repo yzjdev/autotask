@@ -231,7 +231,8 @@ open class DramaAccessibilityService : AccessibilityService() {
 
     /** getActivityInfo 反查:确认 pkg/cls 确实是已注册的 Activity(非 Activity 窗口会抛异常) */
     private fun isRealActivity(pkg: String, cls: String): Boolean = runCatching {
-        packageManager.getActivityInfo(ComponentName(pkg, cls), 0) != null
+        packageManager.getActivityInfo(ComponentName(pkg, cls), 0)
+        true // getActivityInfo 未抛异常即为已注册(返回值恒非 null)
     }.getOrDefault(false)
 
     /** 窗口切换(进入新页面 / 播放页):先驱动任务引擎,再留给子类扩展 */
@@ -466,6 +467,9 @@ open class DramaAccessibilityService : AccessibilityService() {
         else metrics.widthPixels to metrics.heightPixels
     }
 
+    fun screenWidth(): Int = screenSize()?.first ?: 0
+    fun screenHeight(): Int = screenSize()?.second ?: 0
+
     private fun isProcessed(node: AccessibilityNodeInfo): Boolean {
         synchronized(processedLock) {
             if (processedNodes.contains(node)) return true
@@ -474,6 +478,7 @@ open class DramaAccessibilityService : AccessibilityService() {
         }
     }
 
+    @Suppress("DEPRECATION") // API 33 起 recycle 由系统自动处理,但旧版本仍需手动释放;运行时按版本判断
     private fun recycleSafely(node: AccessibilityNodeInfo) {
         try {
             node.recycle()

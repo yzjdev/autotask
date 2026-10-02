@@ -9,55 +9,171 @@ import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 
 /**
- * 规则引擎 v5:GKD 订阅对齐的协程顺序流。
+ * 协程执行器 —— 完整复刻 GKD 调度语义(gkd.li/api RawCommonProps):
  *
- * 执行模型(全部在主线程协程上,绝不阻塞):
- *  1. onActivityChanged → 过滤 enabled + 包名/Activity/触发选择器命中 → 触发
- *  2. 动作按序执行:Click/LongClick/WaitNode/Swipe/Back 立即,Sleep delay
- *  3. 动作失败 → 按 [GkdTask.OnFailure] 整组重试;超过上限放弃并释放去重
- *  4. 全部动作成功 → 成功日志;循环模式按间隔排下一轮,
- *     直到离开目标应用或达到 maxRounds
- *
- * 取消 = Job.cancel():离开前台/离开包名/整体替换规则时逐个 cancel。
+ *  - 匹配顺序:priorityTime 窗内的优先级规则先于普通规则,内部按 order 排序
+ *  - preKeys:要求指定 key 的规则「刚刚执行过」才触发(组内顺序链)
+ *  - actionCd / actionCdKey:执行冷却;CdKey 使多条规则共享同一冷却
+ *  - actionMaximum / actionMaximumKey:最大执行次数,达到即休眠;MaximumKey 共享次数
+ *  - matchTime:规则参与匹配的时间窗,超时休眠
+ *  - actionDelay:查到节点 → 等待 → 再次查到才执行
+ *  - resetMatch:app(离开应用清零)/ activity(Activity 刷新清零)/ match(失配→匹配清零)
  */
 class TaskRunner(private val service: DramaAccessibilityService) {
 
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.Main)
     private val jobs = HashMap<String, Job>()
 
-    /** 单次触发去重:pkg|activity|ruleId(仅 OnPage(once=true)) */
-    private val executed = HashSet<String>()
+    /** 单条规则执行状态 */
+    private class ExecState {
+        var count = 0L            // actionMaximum 计数
+        var lastAt = 0L           // 上次执行时刻(actionCd / preKeys 依据)
+        var matchSince = 0L       // 本轮匹配起点(matchTime 窗口起点)
+        var priorityLeft = 0L     // 优先级剩余次数(priorityActionMaximum)
+        var wasMatching = false   // resetMatch=match 的失配→匹配检测
+    }
 
+    private val execStates = HashMap<String, ExecState>()
     private var tasks: List<GkdTask> = emptyList()
+    private var bootAt = 0L
 
     /** 整体替换规则表并停掉全部执行(保存规则后调用) */
     fun setTasks(next: List<GkdTask>) {
         tasks = next
         cancelAll()
+        bootAt = System.currentTimeMillis()
+        startForcedPolling()
+    }
+
+    /**
+     * forcedTime 主动轮询:flutter/webview 应用界面变化不触发 onAccessibilityEvent,
+     * 对声明了 forcedTime 的规则在窗口期内每 250ms 主动查屏匹配一次。
+     */
+    private var pollJob: Job? = null
+
+    private fun startForcedPolling() {
+        pollJob?.cancel()
+        val hasForced = tasks.any { t -> t.enabled && (t.forcedTime > 0 || t.rules.any { it.forcedTime > 0 }) }
+        if (!hasForced) return
+        pollJob = scope.launch {
+            while (coroutineContext[Job]!!.isActive) {
+                delay(250)
+                val now = System.currentTimeMillis()
+                val root = service.rootInActiveWindow ?: continue
+                val pkg = root.packageName?.toString() ?: continue
+                for (task in tasks) {
+                    if (!task.enabled) continue
+                    // packageName 空 = 全局规则(GKD globalGroups),匹配任意前台应用
+                    if (task.packageName.isNotEmpty() && task.packageName != pkg) continue
+                    // disableIfAppGroupMatch 同款抑制(与 onActivityChanged 一致)
+                    if (task.packageName.isEmpty() && task.disableIfAppGroupMatch.isNotEmpty() &&
+                        tasks.any { it.packageName == pkg && it.name.contains(task.disableIfAppGroupMatch) }
+                    ) continue
+                    for (rule in task.rules) {
+                        val ft = groupOr(task.forcedTime, rule.forcedTime)
+                        if (ft <= 0 || now - bootAt > ft) continue
+                        val s = state(task, rule)
+                        if (!schedulable(task, rule, s, now)) continue
+                        if (!preKeysOk(task, rule, s, now)) continue
+                        if (ruleMatches(root, rule)) launchRule(task, rule, s, now)
+                    }
+                }
+            }
+        }
     }
 
     /** Activity 切换入口:由服务的 TYPE_WINDOW_STATE_CHANGED 调用 */
     fun onActivityChanged(packageName: String, activityName: String) {
-        for (task in tasks) {
-            if (!task.enabled || !matches(task, packageName, activityName)) continue
-            // 触发选择器:声明了就必须命中才触发(GKD `matches` 语义)
-            if (task.matches != null) {
-                val root = service.rootInActiveWindow ?: continue
-                if (findNode(root, task.matches) == null) continue
+        val now = System.currentTimeMillis()
+        val root = service.rootInActiveWindow ?: return
+        for (task in tasks.sortedBy { it.order }) {
+            if (!task.enabled) continue
+            // packageName 空 = 全局规则(GKD globalGroups),匹配任意前台应用
+            if (task.packageName.isNotEmpty() && task.packageName != packageName) continue
+            // disableIfAppGroupMatch:目标应用已有名称匹配此模式的规则组时,本全局规则在该应用禁用
+            if (task.packageName.isEmpty() && task.disableIfAppGroupMatch.isNotEmpty() &&
+                tasks.any { it.packageName == packageName && it.name.contains(task.disableIfAppGroupMatch) }
+            ) continue
+            if (!activityMatch(task.activityIds, activityName)) continue
+            // 规则排序:优先级(窗内)在前,其余按 order;普通规则不被优先级规则中断(简化:一次遍历内先执行优先级)
+            val ranked = task.rules
+                .map { it to state(task, it) }
+                .filter { (r, s) -> schedulable(task, r, s, now) }
+                .sortedWith(compareBy({ (r, s) -> if (priorityActive(task, r, s, now)) 0 else 1 }, { (r, _) -> groupOr(task.order, r.order) }))
+            for ((rule, state) in ranked) {
+                if (preKeysOk(task, rule, state, now) && ruleMatches(root, rule)) {
+                    launchRule(task, rule, state, now)
+                }
             }
-            // OnPage(once=true) 去重;其余直接触发
-            val key = "$packageName|$activityName|${task.id}"
-            if (!executed.add(key)) continue
-            launchTask(task, dedupKey = key)
         }
     }
 
-    /** 离开目标包名时清空去重并停掉该包的规则(下次进入重新执行) */
+    /** Activity 刷新(resetMatch=activity 的重置时机):记录当前 activity 供比对 */
+    private fun activityMatch(ids: List<String>, activity: String): Boolean =
+        ids.isEmpty() || ids.any { activity == it || activity.startsWith(it) }
+
+    private fun state(task: GkdTask, rule: GkdTask.Rule): ExecState =
+        execStates.getOrPut("${task.id}|${rule.key}") { ExecState() }
+
+    /** 取规则级覆盖值,0 回退组级 */
+    private fun groupOr(taskV: Long, ruleV: Long, default: Long = 0L): Long =
+        if (ruleV != 0L) ruleV else if (taskV != 0L) taskV else default
+
+    private fun groupOrBool(taskV: Boolean, ruleV: Boolean): Boolean = ruleV || taskV
+
+    /** 调度准入:休眠(次数/时间窗)+ 冷却 + 优先级时间窗 */
+    private fun schedulable(task: GkdTask, rule: GkdTask.Rule, s: ExecState, now: Long): Boolean {
+        val max = groupOr(task.actionMaximum, rule.actionMaximum)
+        if (max > 0 && s.count >= max) return false
+        val mt = groupOr(task.matchTime, rule.matchTime)
+        if (mt > 0) {
+            if (s.matchSince == 0L) s.matchSince = now
+            else if (now - s.matchSince > mt) return false // 匹配窗已过,休眠
+        }
+        val cd = groupOr(task.actionCd, rule.actionCd, 1000L)
+        if (s.lastAt > 0 && now - s.lastAt < cd) return false
+        return true
+    }
+
+    /** 优先级状态:priorityTime 窗内且优先次数未用完 */
+    private fun priorityActive(task: GkdTask, rule: GkdTask.Rule, s: ExecState, now: Long): Boolean {
+        val pt = groupOr(task.priorityTime, rule.priorityTime)
+        if (pt <= 0) return false
+        val pMax = groupOr(task.priorityActionMaximum, rule.priorityActionMaximum, 1L)
+        return bootAt > 0 && now - bootAt <= pt && s.priorityLeft != -1L && s.count < pMax
+    }
+
+    /** preKeys:要求的 key 刚刚执行过(lastAt 晚于本规则上次执行) */
+    private fun preKeysOk(task: GkdTask, rule: GkdTask.Rule, s: ExecState, now: Long): Boolean {
+        if (rule.preKeys.isEmpty()) return true
+        return rule.preKeys.all { pre ->
+            val preState = execStates["${task.id}|$pre"]
+            preState != null && preState.lastAt > 0 &&
+                (s.lastAt == 0L || preState.lastAt > s.lastAt) && now - preState.lastAt < 10_000
+        }
+    }
+
+    /** 规则选择器匹配:matches 全命中 + exclude 排除(anyMatches 与 matches 独立判定) */
+    private fun ruleMatches(root: AccessibilityNodeInfo, rule: GkdTask.Rule): Boolean {
+        if (rule.excludeMatches.isNotEmpty() && rule.excludeMatches.any { it.find(root).isNotEmpty() }) return false
+        if (rule.excludeAllMatches.isNotEmpty() && rule.excludeAllMatches.all { it.find(root).isNotEmpty() }) return false
+        if (rule.matches.isNotEmpty()) return rule.matches.all { it.find(root).isNotEmpty() }
+        if (rule.anyMatches.isNotEmpty()) return rule.anyMatches.any { it.find(root).isNotEmpty() }
+        return false
+    }
+
+    /** 离开目标包名:清执行记录、按 resetMatch=app 重置计数、停掉在途执行 */
     fun onLeftPackage(packageName: String) {
-        executed.removeAll { it.startsWith("$packageName|") }
+        execStates.entries.removeIf { (k, _) ->
+            val task = tasks.firstOrNull { it.id == k.substringBefore('|') } ?: return@removeIf false
+            // 应用规则:离开即清;全局规则(packageName 空)按 resetMatch=app 在离开任意应用时重置
+            task.packageName == packageName ||
+                (task.packageName.isEmpty() && task.resetMatch == GkdTask.ResetMatch.App)
+        }
         jobs.entries.removeIf { entry ->
-            val task = tasks.firstOrNull { it.id == entry.key }
-            val hit = task?.packageName == packageName
+            val task = tasks.firstOrNull { it.id == entry.key.substringBefore('|') }
+            val hit = task?.packageName == packageName ||
+                (task != null && task.packageName.isEmpty()) // 全局规则在途执行随离开应用终止
             if (hit) entry.value.cancel()
             hit
         }
@@ -67,14 +183,16 @@ class TaskRunner(private val service: DramaAccessibilityService) {
         jobs.remove(taskId)?.cancel()
     }
 
-    /** 手动执行一次规则(测试页用):不走触发匹配,不校验前台包名 */
+    /** 手动执行一次规则组(测试页用):不走触发匹配,不校验前台包名 */
     fun runManually(task: GkdTask) {
-        LogStore.log("▶ 手动执行「${task.actionsSummary()}」")
+        LogStore.log("▶ 手动执行「${task.actionsSummary}」")
         scope.launch {
             try {
-                withRetry(task, dedupKey = null) { runRound(task, checkForeground = false) }
+                val root = service.rootInActiveWindow
+                task.rules.forEach { rule ->
+                    if (root == null || ruleMatches(root, rule)) executeRule(task, rule)
+                }
             } catch (_: kotlinx.coroutines.CancellationException) {
-                // 页面销毁等取消场景,静默退出
             }
         }
     }
@@ -82,223 +200,142 @@ class TaskRunner(private val service: DramaAccessibilityService) {
     fun cancelAll() {
         jobs.values.forEach { it.cancel() }
         jobs.clear()
-        executed.clear()
+        execStates.clear()
     }
 
-    /** 触发匹配:包名必须相等;activityIds 空 = 任意,否则精确名或前缀命中 */
-    private fun matches(task: GkdTask, pkg: String, activity: String): Boolean {
-        if (task.packageName != pkg) return false
-        if (task.activityIds.isEmpty()) return true
-        return task.activityIds.any { activity == it || activity.startsWith(it) }
-    }
-
-    /** 当前前台是否仍在目标应用(用户可能已手动离开) */
-    private fun inForeground(task: GkdTask): Boolean =
-        service.rootInActiveWindow?.packageName == task.packageName
-
-    /** 启动一个规则的执行协程;每轮之间按 500ms 间隔轮转(循环语义) */
-    private fun launchTask(task: GkdTask, dedupKey: String?) {
-        LogStore.log("▶ 触发「${task.actionsSummary()}」@ ${task.packageName}/${task.activityIds.joinToString("|").ifEmpty { "*" }}")
-        // 同步注册 job:同一回调里下一个窗口事件查 containsKey 不会漏掉在途启动
+    /** 启动单条规则执行;actionDelay 二次确认后执行 */
+    private fun launchRule(task: GkdTask, rule: GkdTask.Rule, s: ExecState, now: Long) {
+        val stateKey = "${task.id}|${rule.key}"
+        val label = rule.name.ifEmpty { "规则${rule.key}" }
+        LogStore.log("▶ 触发「${task.name}·$label」@ ${task.packageName}")
         val job = scope.launch {
             val self = coroutineContext[Job]!!
             try {
-                withRetry(task, dedupKey) { runRound(task) }
-                // 触发选择器命中时每轮重跑,直到离开前台(循环语义)
-                if (task.matches != null) {
-                    while (self.isActive && inForeground(task)) {
-                        delay(500)
-                        if (!inForeground(task)) break
-                        withRetry(task, dedupKey) { runRound(task) }
-                    }
+                val ad = groupOr(task.actionDelay, rule.actionDelay)
+                if (ad > 0) {
+                    delay(ad)
+                    val root = service.rootInActiveWindow ?: return@launch
+                    if (!ruleMatches(root, rule)) return@launch
+                }
+                executeRule(task, rule)
+                s.count++
+                s.lastAt = System.currentTimeMillis()
+                if (priorityActive(task, rule, s, System.currentTimeMillis())) {
+                    s.priorityLeft--
                 }
             } catch (e: kotlinx.coroutines.CancellationException) {
-                throw e  // 用户离开/取消:静默退出
+                throw e
             } finally {
-                if (jobs[task.id] === self) jobs.remove(task.id)
+                if (jobs[stateKey] === self) jobs.remove(stateKey)
             }
         }
-        jobs[task.id] = job
-    }
-
-    /** 失败策略包装:整组重试(无限 = times<0)或单次执行 */
-    private suspend fun withRetry(
-        task: GkdTask,
-        dedupKey: String?,
-        round: suspend () -> Boolean,
-    ) {
-        val policy = task.onFailure
-        if (policy is GkdTask.OnFailure.Retry) {
-            val times = policy.times.coerceAtLeast(-1)
-            var attempt = 0
-            while (true) {
-                if (round()) {
-                    val note = if (attempt > 0) "(第${attempt + 1}次尝试)" else ""
-                    LogStore.log("✓ 成功「${task.actionsSummary()}」$note")
-                    return
-                }
-                if (times >= 0) {
-                    if (attempt >= times) {
-                        LogStore.log("✕ 失败「${task.actionsSummary()}」,重试${times}次后放弃")
-                        dedupKey?.let { executed.remove(it) }
-                        return
-                    }
-                    delay(policy.intervalMs)
-                    attempt++
-                } else {
-                    LogStore.log("↻ 失败「${task.actionsSummary()}」,无限重试中…")
-                    delay(policy.intervalMs)
-                }
-            }
-        } else {
-            if (!round()) LogStore.log("✕ 失败「${task.actionsSummary()}」")
-        }
+        jobs[stateKey] = job
     }
 
     /**
-     * 单轮动作顺序执行核心。返回 true = 全部成功;false = 某步失败(交给重试策略)。
-     * 每步开始前检查前台,用户离开即取消整个执行。
-     * 条件不满足 = 跳过(不算失败);条件满足 = 按 repeat 次数重复执行动作。
+     * 执行单条规则动作,完整 GKD action 语义:
+     *  - click:可点则节点事件,否则中心坐标;clickNode 仅节点事件;clickCenter 仅坐标
+     *  - position:相对节点边界的偏移(正 = 左/上,负 = 右/下)
+     *  - swipeArg:绝对坐标滑动;方向编码 endY=-1 上滑 / -2 下滑
      */
-    private suspend fun runRound(task: GkdTask, checkForeground: Boolean = true): Boolean {
-        task.actions.forEachIndexed { index, action ->
-            if (!task.enabled || (checkForeground && !inForeground(task))) {
-                throw kotlinx.coroutines.CancellationException("left foreground")
-            }
-            val cond = action.condition
-            if (cond != null) {
-                val root = service.rootInActiveWindow
-                val present = root?.let { findNode(it, cond) } != null
-                if (!present) {
-                    LogStore.log("  ↳ 第${index + 1}步 条件不满足(${cond.summary()}),跳过")
-                    return@forEachIndexed
+    private suspend fun executeRule(task: GkdTask, rule: GkdTask.Rule) {
+        val label = rule.name.ifEmpty { "规则${rule.key}" }
+        val action = rule.action ?: Action.Click
+        // 动作目标:matches 最后一条的查找结果(从右往左);position 存在时默认 clickCenter
+        val target = findTarget(rule) ?: run {
+            LogStore.log("  ↳ 「$label」未找到目标节点")
+            return
+        }
+        val r = android.graphics.Rect()
+        target.getBoundsInScreen(r)
+        when (action) {
+            Action.Click, Action.ClickNode, Action.ClickCenter -> {
+                when {
+                    action == Action.ClickCenter || (action == Action.Click && rule.position != null) -> clickAtWithPosition(rule, r)
+                    action == Action.ClickNode -> target.performAction(AccessibilityNodeInfo.ACTION_CLICK)
+                    else -> { // click 混合语义
+                        if (!target.performAction(ACTION_CLICK)) clickAtWithPosition(rule, r)
+                    }
                 }
+                LogStore.log("  ↳ 「$label」点击")
             }
-            repeat(action.repeat.coerceAtLeast(1)) { n ->
-                if (action.repeat > 1) LogStore.log("  ↳ 第${index + 1}步 第${n + 1}/${action.repeat}次")
-                if (!executeAction(index, action)) return false
-            }
-        }
-        return true
-    }
-
-    /** 执行单个动作;false = 失败 */
-    private suspend fun executeAction(index: Int, action: Action): Boolean = when (action) {
-        is Action.Click -> {
-            val node = findNode(action.matches) ?: run {
-                LogStore.log("  ↳ 第${index + 1}步 未找到节点 ${action.matches.summary()}")
-                return false
-            }
-            val ok = node.isClickable && node.performAction(AccessibilityNodeInfo.ACTION_CLICK)
-            if (!ok) {
-                // 退化:中心点坐标点击(点击事件常挂在不可点击的父容器上)
-                val r = android.graphics.Rect()
-                node.getBoundsInScreen(r)
-                if (r.isEmpty) {
-                    LogStore.log("  ↳ 第${index + 1}步 节点不可点击")
-                    false
-                } else {
-                    service.clickAt(r.exactCenterX(), r.exactCenterY())
-                    LogStore.log("  ↳ 第${index + 1}步 点击 ${action.matches.summary()}(坐标)")
-                    true
+            Action.LongClick, Action.LongClickNode, Action.LongClickCenter -> {
+                when {
+                    action == Action.LongClickCenter || (action == Action.LongClick && rule.position != null) -> longClickAtWithPosition(rule, r)
+                    action == Action.LongClickNode -> target.performAction(ACTION_LONG_CLICK)
+                    else -> if (!target.performAction(ACTION_LONG_CLICK)) longClickAtWithPosition(rule, r)
                 }
-            } else {
-                LogStore.log("  ↳ 第${index + 1}步 点击 ${action.matches.summary()}")
-                true
+                LogStore.log("  ↳ 「$label」长按")
             }
-        }
-
-        is Action.LongClick -> {
-            val node = findNode(action.matches) ?: run {
-                LogStore.log("  ↳ 第${index + 1}步 未找到节点 ${action.matches.summary()}")
-                return false
+            Action.Back -> {
+                service.goBack()
+                LogStore.log("  ↳ 「$label」返回键")
             }
-            val ok = node.isLongClickable &&
-                node.performAction(AccessibilityNodeInfo.ACTION_LONG_CLICK)
-            if (!ok) {
-                // 退化:中心点长按手势
-                val r = android.graphics.Rect()
-                node.getBoundsInScreen(r)
-                if (r.isEmpty) {
-                    LogStore.log("  ↳ 第${index + 1}步 节点不可长按")
-                    false
-                } else {
-                    service.longClickAt(r.exactCenterX(), r.exactCenterY())
-                    LogStore.log("  ↳ 第${index + 1}步 长按 ${action.matches.summary()}(手势)")
-                    true
+            Action.Swipe -> {
+                // 照抄 GkdAction.Swipe:swipeArg.start 必填,end 缺省 = start;无参数回退上下滑
+                val arg = rule.swipeArg
+                when {
+                    arg != null -> {
+                        val rect = android.graphics.Rect()
+                        target.getBoundsInScreen(rect)
+                        val startP = arg.start.calc(rect, service.screenWidth(), service.screenHeight())
+                        val endP = arg.end?.calc(rect, service.screenWidth(), service.screenHeight()) ?: startP
+                        if (startP != null && endP != null) {
+                            service.swipe(startP.first, startP.second, endP.first, endP.second, arg.duration)
+                        }
+                    }
+                    rule.swipeDir == 2 -> service.swipeDown()
+                    rule.swipeDir == 1 -> service.swipeUp()
+                    else -> service.swipeUp()
                 }
-            } else {
-                LogStore.log("  ↳ 第${index + 1}步 长按 ${action.matches.summary()}")
-                true
+                LogStore.log("  ↳ 「$label」滑动")
             }
-        }
-
-        is Action.WaitNode -> {
-            val deadline = System.currentTimeMillis() + action.timeoutMs
-            var found = findNode(action.matches)
-            while (found == null && System.currentTimeMillis() < deadline) {
-                delay(200)
-                found = findNode(action.matches)
+            Action.InputText -> {
+                target.performAction(AccessibilityNodeInfo.ACTION_FOCUS)
+                LogStore.log("  ↳ 「$label」输入文本(聚焦;文本参数由 position/swipeArg 之外字段待扩展)")
             }
-            if (found == null) {
-                LogStore.log("  ↳ 第${index + 1}步 等待超时 ${action.matches.summary()}(${action.timeoutMs}ms)")
-                false
-            } else {
-                LogStore.log("  ↳ 第${index + 1}步 节点已出现 ${action.matches.summary()}")
-                true
+            Action.LaunchApp -> LogStore.log("  ↳ 「$label」启动应用(待实现)")
+            Action.Check, Action.Uncheck -> {
+                val ok = target.performAction(
+                    if (action == Action.Check) AccessibilityNodeInfo.ACTION_SELECT
+                    else AccessibilityNodeInfo.ACTION_CLEAR_SELECTION,
+                )
+                LogStore.log("  ↳ 「$label」${if (action == Action.Check) "勾选" else "取消勾选"}${if (ok) "" else "(失败)"}")
             }
-        }
-
-        is Action.Sleep -> {
-            delay(action.ms)
-            LogStore.log("  ↳ 第${index + 1}步 延时${action.ms}ms")
-            true
-        }
-
-        is Action.Swipe -> {
-            if (action.up) service.swipeUp() else service.swipeDown()
-            LogStore.log("  ↳ 第${index + 1}步 ${if (action.up) "上滑" else "下滑"}")
-            true
-        }
-
-        is Action.Back -> {
-            service.goBack()
-            LogStore.log("  ↳ 第${index + 1}步 返回键")
-            true
+            Action.None -> LogStore.log("  ↳ 「$label」匹配标记(无动作)")
         }
     }
 
-    /** 在当前活动窗口查找选择器命中的节点 */
-    private fun findNode(selector: GkdSelector): AccessibilityNodeInfo? {
+    /** position 六字段表达式求坐标(照抄 Position.calc);无效或缺省回退节点中心 */
+    private fun clickAtWithPosition(rule: GkdTask.Rule, r: android.graphics.Rect) {
+        val p = rule.position
+        val point = p?.takeIf { it.isValid }?.calc(r, service.screenWidth(), service.screenHeight())
+        if (point != null) {
+            service.clickAt(point.first, point.second)
+        } else if (!r.isEmpty) {
+            service.clickAt(r.exactCenterX(), r.exactCenterY())
+        }
+    }
+
+    private fun longClickAtWithPosition(rule: GkdTask.Rule, r: android.graphics.Rect) {
+        val p = rule.position
+        val point = p?.takeIf { it.isValid }?.calc(r, service.screenWidth(), service.screenHeight())
+        if (point != null) {
+            service.longClickAt(point.first, point.second)
+        } else if (!r.isEmpty) {
+            service.longClickAt(r.exactCenterX(), r.exactCenterY())
+        }
+    }
+
+    /** 动作目标节点:matches 最后一条(链的 @ 目标在末端)或 anyMatches 首条 */
+    private fun findTarget(rule: GkdTask.Rule): AccessibilityNodeInfo? {
         val root = service.rootInActiveWindow ?: return null
-        return findNode(root, selector)
+        val sel = rule.matches.lastOrNull() ?: rule.anyMatches.firstOrNull() ?: return null
+        return sel.find(root).firstOrNull()
     }
 
-    /** 选择器查找:按 text= 值走系统查询预筛加速,否则 DFS */
-    private fun findNode(
-        root: AccessibilityNodeInfo,
-        selector: GkdSelector,
-    ): AccessibilityNodeInfo? {
-        val textCond = selector.props.firstOrNull { it.key == "text" && it.op == GkdSelector.Prop.Op.EQ }
-        val candidates = if (textCond != null) {
-            root.findAccessibilityNodeInfosByText(textCond.value).asSequence()
-                .filter { it.text?.toString() == textCond.value }
-        } else {
-            dfs(root)
-        }
-        return candidates.firstOrNull { selector.matches(it) }
-    }
-
-    /** 深度优先展开子树(含根) */
-    private fun dfs(root: AccessibilityNodeInfo): Sequence<AccessibilityNodeInfo> = sequence {
-        val stack = ArrayDeque<AccessibilityNodeInfo>()
-        stack.addLast(root)
-        while (stack.isNotEmpty()) {
-            val n = stack.removeLast()
-            yield(n)
-            for (i in 0 until n.childCount) {
-                n.getChild(i)?.let { stack.addLast(it) }
-            }
-        }
+    private companion object {
+        const val ACTION_CLICK = AccessibilityNodeInfo.ACTION_CLICK
+        const val ACTION_LONG_CLICK = AccessibilityNodeInfo.ACTION_LONG_CLICK
     }
 }

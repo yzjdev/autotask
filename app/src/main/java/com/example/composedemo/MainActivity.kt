@@ -44,10 +44,10 @@ import rikka.shizuku.Shizuku
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
 import androidx.compose.material.icons.automirrored.filled.KeyboardArrowRight
 import androidx.compose.material.icons.filled.AccessibilityNew
+import androidx.compose.material.icons.automirrored.filled.Article
 import androidx.compose.material.icons.filled.Adjust
 import androidx.compose.material.icons.filled.Apps
 import androidx.compose.material.icons.filled.Block
-import androidx.compose.material.icons.filled.Article
 import androidx.compose.material.icons.filled.Language
 import androidx.compose.material.icons.filled.WifiOff
 import androidx.compose.material.icons.filled.Wifi
@@ -59,6 +59,7 @@ import androidx.compose.material.icons.filled.KeyboardArrowUp
 import androidx.compose.material.icons.filled.KeyboardBackspace
 import androidx.compose.material.icons.filled.MoreVert
 import androidx.compose.material.icons.filled.Layers
+import androidx.compose.material.icons.filled.CloudDownload
 import androidx.compose.material.icons.filled.GetApp
 import androidx.compose.material.icons.filled.HourglassTop
 import androidx.compose.material.icons.filled.RadioButtonChecked
@@ -97,7 +98,7 @@ import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Scaffold
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Tab
-import androidx.compose.material3.TabRow
+import androidx.compose.material3.PrimaryTabRow
 import androidx.compose.material3.Switch
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
@@ -109,6 +110,7 @@ import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.saveable.rememberSaveable
+import androidx.compose.runtime.snapshotFlow
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
@@ -116,7 +118,7 @@ import androidx.compose.ui.graphics.ImageBitmap
 import androidx.compose.ui.graphics.asImageBitmap
 import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.platform.LocalContext
-import androidx.compose.ui.platform.LocalLifecycleOwner
+import androidx.lifecycle.compose.LocalLifecycleOwner
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.tooling.preview.Preview
@@ -128,6 +130,7 @@ import androidx.compose.ui.draw.clip
 import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.flow.drop
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import com.example.composedemo.automation.AutomationManager
@@ -139,9 +142,9 @@ import com.example.composedemo.automation.GkdSelector
 import com.example.composedemo.automation.Action
 import com.example.composedemo.automation.GkdTask
 import com.example.composedemo.automation.GkdSubscription
+import com.example.composedemo.automation.SubscriptionFetcher
+import com.example.composedemo.automation.SubscriptionStore
 import com.example.composedemo.automation.TaskStore
-import com.example.composedemo.automation.label
-import com.example.composedemo.automation.actionsSummary
 import com.example.composedemo.ui.theme.ComposeDemoTheme
 
 class MainActivity : ComponentActivity() {
@@ -192,6 +195,11 @@ private fun applyRecentsHidden(activity: android.app.Activity) {
     }
 }
 
+/** 订阅导入完成通知:应用页监听 version 变化重载规则列表(跨 tab 同步) */
+internal object RuleSync {
+    var version by mutableStateOf(0)
+}
+
 /** 自动化主界面 */
 @Composable
 fun AutomationScreen() {
@@ -225,6 +233,12 @@ fun AutomationScreen() {
 
     // ---- 应用 tab 共享数据:提升到顶层,切 tab 不销毁、不重新加载 ----
     var tasks by remember { mutableStateOf(TaskStore.loadAll(context.applicationContext)) }
+    // 订阅导入后同步:RuleSync.version 变化即从磁盘重载规则列表(引擎已由导入方直接换表)
+    LaunchedEffect(Unit) {
+        snapshotFlow { RuleSync.version }.drop(1).collect {
+            tasks = TaskStore.loadAll(context.applicationContext)
+        }
+    }
     fun persistTasks(next: List<GkdTask>) {
         tasks = next
         TaskStore.saveAll(context.applicationContext, next)
@@ -266,7 +280,10 @@ fun AutomationScreen() {
     }
     // 展示列表 = 已装应用(按系统/用户标记)∪ 有任务的应用,按显示名排序;
     // 有任务的应用始终保留,否则任务无法管理。isSystem 供 AppsScreen 按 tab 过滤。
-    val allApps = remember(installedApps, tasks) {
+    // 安装时间单独后台批查:getPackageInfo 是逐包 binder IPC,几百个包在主线程会阻塞 UI 数秒;
+    // 列表先以 installTime=0 渲染,查完由 installTimes 注入刷新(排序"最近安装"随后自动纠正)。
+    var installTimes by remember { mutableStateOf<Map<String, Long>>(emptyMap()) }
+    val allApps = remember(installedApps, tasks, installTimes) {
         val infos = (installedApps ?: emptyList()).associateBy { it.packageName }
         val pkgs = linkedSetOf<String>()
         infos.keys.forEach { pkgs += it }
@@ -277,11 +294,26 @@ fun AutomationScreen() {
                 label = labelByPkg[pkg] ?: pkg,
                 taskCount = tasks.count { it.packageName == pkg },
                 isSystem = infos[pkg]?.isSystem ?: false,
-                installTime = runCatching {
-                    context.packageManager.getPackageInfo(pkg, 0).firstInstallTime
-                }.getOrDefault(0L),
+                installTime = installTimes[pkg] ?: 0L,
+                // 不在已装清单 = 订阅规则指向的未安装应用(灰色展示、排序置后)
+                installed = infos.containsKey(pkg),
             )
         }.sortedBy { it.label.lowercase() }
+    }
+    LaunchedEffect(installedApps, tasks) {
+        val pkgs = buildSet {
+            (installedApps ?: emptyList()).forEach { add(it.packageName) }
+            tasks.forEach { add(it.packageName) }
+        }
+        val pending = pkgs.filterNot { installTimes.containsKey(it) }
+        if (pending.isEmpty()) return@LaunchedEffect
+        val loaded = withContext(Dispatchers.Default) {
+            val pm = context.packageManager
+            pending.associateWith { pkg ->
+                runCatching { pm.getPackageInfo(pkg, 0).firstInstallTime }.getOrDefault(0L)
+            }
+        }
+        installTimes = installTimes + loaded
     }
     // 应用图标缓存:后台逐包加载一次,切 tab 复用(新建 Bitmap + Canvas 绘制不能占主线程)
     var iconsByPkg by remember { mutableStateOf<Map<String, ImageBitmap>>(emptyMap()) }
@@ -344,7 +376,7 @@ fun AutomationScreen() {
                     NavigationBarItem(
                         selected = tab == 2,
                         onClick = { tab = 2 },
-                        icon = { Icon(Icons.Filled.Article, contentDescription = null) },
+                        icon = { Icon(Icons.AutoMirrored.Filled.Article, contentDescription = null) },
                         label = { Text("日志") },
                         colors = navItemColors,
                     )
@@ -479,7 +511,9 @@ private fun HomeScreen(
         modifier = modifier
             .fillMaxSize()
             .verticalScroll(rememberScrollState())
-            .padding(horizontal = 16.dp),
+            .padding(horizontal = 16.dp)
+            // 底部留白:权限管理卡片不贴屏幕底(兼顾导航条遮挡)
+            .padding(bottom = 32.dp),
         verticalArrangement = Arrangement.spacedBy(12.dp),
     ) {
         TitleBar(serviceConnected = serviceConnected)
@@ -492,10 +526,10 @@ private fun HomeScreen(
             onToggle = onToggleAccessibility,
         )
 
-        // 功能切换胶囊:横排
-        Row(horizontalArrangement = Arrangement.spacedBy(12.dp)) {
+        // 功能切换胶囊:竖排,避免长标题在半宽胶囊里横向挤压
+        Column(verticalArrangement = Arrangement.spacedBy(12.dp)) {
             TogglePill(
-                modifier = Modifier.weight(1f),
+                modifier = Modifier.fillMaxWidth(),
                 icon = Icons.Filled.Adjust,
                 accent = MaterialTheme.colorScheme.tertiary,
                 title = "节点悬浮窗",
@@ -504,7 +538,7 @@ private fun HomeScreen(
                 onToggle = onOverlayToggle,
             )
             TogglePill(
-                modifier = Modifier.weight(1f),
+                modifier = Modifier.fillMaxWidth(),
                 icon = Icons.Filled.Layers,
                 accent = MaterialTheme.colorScheme.secondary,
                 title = "隐藏最近任务",
@@ -516,6 +550,50 @@ private fun HomeScreen(
                     recentsHidden = target
                 },
             )
+        }
+
+        // 远程订阅入口:已订阅数量,点击打开管理(URL 添加/刷新/删除)
+        var subDialogOpen by remember { mutableStateOf(false) }
+        val subCount = remember(subDialogOpen) { SubscriptionStore.loadAll(context).size }
+        Card(
+            onClick = { subDialogOpen = true },
+            modifier = Modifier.fillMaxWidth(),
+            colors = CardDefaults.cardColors(
+                containerColor = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.45f),
+            ),
+            shape = MaterialTheme.shapes.large,
+        ) {
+            Row(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .padding(14.dp),
+                verticalAlignment = Alignment.CenterVertically,
+            ) {
+                AccentIcon(
+                    imageVector = Icons.Filled.CloudDownload,
+                    accent = MaterialTheme.colorScheme.primary,
+                    size = 40.dp,
+                    iconSize = 22.dp,
+                    shape = CircleShape,
+                )
+                Spacer(modifier = Modifier.width(12.dp))
+                Column(modifier = Modifier.weight(1f)) {
+                    Text(
+                        "远程订阅",
+                        style = MaterialTheme.typography.titleSmall,
+                        fontWeight = FontWeight.SemiBold,
+                        color = MaterialTheme.colorScheme.onSurface,
+                    )
+                    Text(
+                        text = if (subCount == 0) "添加 GKD 订阅链接,自动导入规则" else "已订阅 $subCount 个,点击管理",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    )
+                }
+            }
+        }
+        if (subDialogOpen) {
+            SubscriptionManageDialog(onDismiss = { subDialogOpen = false })
         }
 
         // 权限管理入口
@@ -727,6 +805,34 @@ private fun StatusDot(active: Boolean, accent: Color, size: Dp = 10.dp) {
     )
 }
 
+/** 来源角标:远程订阅导入(SUB) / 本地自定义(自定义);区分规则来源 */
+@Composable
+private fun SourceBadge(isRemote: Boolean) {
+    Surface(
+        shape = MaterialTheme.shapes.small,
+        color = if (isRemote) {
+            MaterialTheme.colorScheme.tertiaryContainer
+        } else {
+            MaterialTheme.colorScheme.secondaryContainer
+        },
+    ) {
+        Text(
+            text = if (isRemote) "订阅" else "自定义",
+            style = MaterialTheme.typography.labelSmall,
+            color = if (isRemote) {
+                MaterialTheme.colorScheme.onTertiaryContainer
+            } else {
+                MaterialTheme.colorScheme.onSecondaryContainer
+            },
+            modifier = Modifier.padding(horizontal = 6.dp, vertical = 2.dp),
+        )
+    }
+}
+
+/** 规则是否来自远程订阅导入(SubscriptionStore/gkd 导入均有 id 前缀;本地新建 = task_/gkd_ 无 sub 标记) */
+private val GkdTask.isFromSubscription: Boolean
+    get() = id.startsWith("sub_")
+
 /** 包名显示名:直接查已装应用标签,查不到回退包名 */
 private fun appLabel(context: android.content.Context, pkg: String, sample: GkdTask?): String {
     // 尝试从已装应用解析显示名(缓存成本低,chip 数量有限)
@@ -735,13 +841,14 @@ private fun appLabel(context: android.content.Context, pkg: String, sample: GkdT
         .getOrDefault(pkg)
 }
 
-/** 应用条目:承载 packageName / label / taskCount / isSystem / installTime */
+/** 应用条目:承载 packageName / label / taskCount / isSystem / installTime / installed(残留订阅规则指向未装应用时 false) */
 private data class AppRow(
     val packageName: String,
     val label: String,
     val taskCount: Int,
     val isSystem: Boolean,
     val installTime: Long = 0L,
+    val installed: Boolean = true,
 )
 
 /** 应用 tab:用户应用 / 系统应用分 tab,标题栏内搜索;点应用进入该应用的独立任务页,长按弹出应用信息抽屉 */
@@ -778,7 +885,8 @@ private fun AppsScreen(
         val filtered = searchedApps.filter { app ->
             (appTab == 1) == app.isSystem
         }
-        when (sortMode) {
+        // 未安装应用统一排在已安装后面,组内仍按所选排序
+        val sorted = when (sortMode) {
             1 -> filtered.sortedWith(compareByDescending(collator) { it.label })
             2 -> filtered.sortedWith(
                 compareByDescending<AppRow> { it.taskCount }.thenBy(collator) { it.label },
@@ -786,6 +894,7 @@ private fun AppsScreen(
             3 -> filtered.sortedByDescending { it.installTime }
             else -> filtered.sortedWith(compareBy(collator) { it.label })
         }
+        sorted.sortedBy { it.installed.not() }
     }
 
     Column(modifier = modifier.fillMaxSize()) {
@@ -848,9 +957,8 @@ private fun AppsScreen(
         }
 
         // 用户应用 / 系统应用分段
-        TabRow(
+        PrimaryTabRow(
             selectedTabIndex = appTab,
-            modifier = Modifier.fillMaxWidth(),
         ) {
             Tab(
                 selected = appTab == 0,
@@ -918,7 +1026,11 @@ private fun AppListCard(
     onLongClick: () -> Unit,
     onToggleNetwork: (Boolean) -> Unit,
 ) {
-    val accent = if (blocked) MaterialTheme.colorScheme.error else MaterialTheme.colorScheme.primary
+    val accent = when {
+        blocked -> MaterialTheme.colorScheme.error
+        app.installed -> MaterialTheme.colorScheme.primary
+        else -> MaterialTheme.colorScheme.outlineVariant // 未安装:灰色调
+    }
     val context = LocalContext.current
     // 联网开关本地状态:实际下命令成功后才回调上层;失败回滚
     var netEnabled by remember(app.packageName) { mutableStateOf(!blocked) }
@@ -1000,11 +1112,14 @@ private fun AppListCard(
                     text = app.label,
                     style = MaterialTheme.typography.titleSmall,
                     fontWeight = FontWeight.SemiBold,
+                    // 未安装应用整卡置灰:文字/包名降为 outline 色
+                    color = if (app.installed) MaterialTheme.colorScheme.onSurface else MaterialTheme.colorScheme.outline,
                 )
                 Text(
-                    text = app.packageName,
+                    // 副标题:包名 + 该应用的规则组数量(有规则时前置)
+                    text = if (app.taskCount > 0) "${app.taskCount} 条规则 · ${app.packageName}" else app.packageName,
                     style = MaterialTheme.typography.bodySmall,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = if (app.installed) 1f else 0.55f),
                 )
             }
             Spacer(modifier = Modifier.width(12.dp))
@@ -1298,6 +1413,25 @@ private fun TaskListPage(
     }
     // 该应用的任务(保持保存顺序)
     val appTasks = tasks.filter { it.packageName == pkg }
+    // 长按删除确认:记录待删除任务 id
+    var pendingDeleteId by remember { mutableStateOf<String?>(null) }
+    pendingDeleteId?.let { delId ->
+        val del = appTasks.firstOrNull { it.id == delId } ?: return@let
+        AlertDialog(
+            onDismissRequest = { pendingDeleteId = null },
+            title = { Text("删除任务") },
+            text = { Text("确定删除「${del.actionsSummary}」?") },
+            confirmButton = {
+                TextButton(onClick = {
+                    onPersistTasks(tasks - del)
+                    pendingDeleteId = null
+                }) { Text("删除", color = MaterialTheme.colorScheme.error) }
+            },
+            dismissButton = {
+                TextButton(onClick = { pendingDeleteId = null }) { Text("取消") }
+            },
+        )
+    }
 
     Column(modifier = modifier.fillMaxSize()) {
         // 顶栏:强调色返回圆钮 + 应用名/包名 + 新建按钮
@@ -1430,7 +1564,13 @@ private fun TaskListPage(
                 val task = appTasks[i]
                 val accent = if (task.enabled) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.outlineVariant
                 Card(
-                    modifier = Modifier.fillMaxWidth(),
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        // 点按卡片进入编辑;长按删除
+                        .combinedClickable(
+                            onClick = { onEditTask(task.id) },
+                            onLongClick = { pendingDeleteId = task.id },
+                        ),
                     colors = CardDefaults.cardColors(
                         containerColor = if (task.enabled) {
                             MaterialTheme.colorScheme.primaryContainer.copy(alpha = 0.35f)
@@ -1448,20 +1588,27 @@ private fun TaskListPage(
                         StatusDot(active = task.enabled, accent = accent, size = 9.dp)
                         Spacer(modifier = Modifier.width(12.dp))
                         Column(modifier = Modifier.weight(1f)) {
-                            Text(
-                                text = task.actionsSummary(),
-                                style = MaterialTheme.typography.titleSmall,
-                                fontWeight = FontWeight.SemiBold,
-                                maxLines = 2,
-                                overflow = TextOverflow.Ellipsis,
-                            )
+                            Row(verticalAlignment = Alignment.CenterVertically) {
+                                Text(
+                                    // 标题:规则名(name)优先,无名称回退动作摘要
+                                    text = task.name.ifEmpty { task.actionsSummary },
+                                    style = MaterialTheme.typography.titleSmall,
+                                    fontWeight = FontWeight.SemiBold,
+                                    maxLines = 2,
+                                    overflow = TextOverflow.Ellipsis,
+                                    modifier = Modifier.weight(1f, fill = false),
+                                )
+                                Spacer(modifier = Modifier.width(8.dp))
+                                // 来源角标:远程订阅导入 / 本地自定义
+                                SourceBadge(isRemote = task.isFromSubscription)
+                            }
                             Text(
                                 text = buildString {
                                     if (task.activityIds.isNotEmpty()) append("Activity≈${task.activityIds.first()} · ")
-                                    append(if (task.matches != null) "触发:${task.matches!!.summary()} · " else "页面就绪即触发 · ")
-                                    (task.onFailure as? GkdTask.OnFailure.Retry)?.let {
-                                        append(if (it.times < 0) "无限重试" else "重试${it.times}次")
-                                    }
+                                    val trigger = task.rules.firstOrNull()?.matches?.firstOrNull()
+                                    append(if (trigger != null) "触发:${trigger.expr} · " else "页面就绪即触发 · ")
+                                    val max = task.actionMaximum
+                                    if (max > 0) append("最多执行${max}次")
                                 },
                                 style = MaterialTheme.typography.bodySmall,
                                 color = MaterialTheme.colorScheme.onSurfaceVariant,
@@ -1472,17 +1619,6 @@ private fun TaskListPage(
                             checked = task.enabled,
                             onCheckedChange = { onToggleTask(task.id, it) },
                         )
-                        // 编辑
-                        TextButton(onClick = { onEditTask(task.id) }) {
-                            Text("编辑")
-                        }
-                        // 删除
-                        TextButton(onClick = { onPersistTasks(tasks - task) }) {
-                            Text(
-                                "删除",
-                                color = MaterialTheme.colorScheme.error,
-                            )
-                        }
                     }
                 }
             }
@@ -1518,10 +1654,13 @@ private fun TaskListPage(
     }
 }
 
-/** 日志 tab:自动化执行记录(触发/成功/失败),LogStore 驱动实时刷新 */
+/** 日志 tab:自动化执行记录(触发/成功/失败),LogStore 驱动实时刷新;点按条目查看详情并复制 */
 @Composable
 private fun LogsScreen(modifier: Modifier = Modifier) {
     var logs by remember { mutableStateOf(LogStore.all()) }
+    // 详情弹窗:展示完整日志文本,一键复制
+    var detailText by remember { mutableStateOf<String?>(null) }
+    val context = androidx.compose.ui.platform.LocalContext.current
 
     DisposableEffect(Unit) {
         val unsubscribe = LogStore.observe { logs = it }
@@ -1537,7 +1676,7 @@ private fun LogsScreen(modifier: Modifier = Modifier) {
             verticalAlignment = Alignment.CenterVertically,
         ) {
             AccentIcon(
-                imageVector = Icons.Filled.Article,
+                imageVector = Icons.AutoMirrored.Filled.Article,
                 accent = MaterialTheme.colorScheme.primary,
                 size = 40.dp,
                 iconSize = 22.dp,
@@ -1584,7 +1723,10 @@ private fun LogsScreen(modifier: Modifier = Modifier) {
                     else -> MaterialTheme.colorScheme.secondary
                 }
                 Card(
-                    modifier = Modifier.fillMaxWidth(),
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        // 点按查看完整详情
+                        .clickable { detailText = "${e.time} ${e.message}" },
                     colors = CardDefaults.cardColors(
                         containerColor = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.45f),
                     ),
@@ -1616,17 +1758,50 @@ private fun LogsScreen(modifier: Modifier = Modifier) {
             }
         }
     }
+
+    // 日志详情弹窗:完整内容 + 复制
+    detailText?.let { text ->
+        AlertDialog(
+            onDismissRequest = { detailText = null },
+            title = { Text("日志详情") },
+            text = {
+                Text(
+                    text = text,
+                    style = MaterialTheme.typography.bodySmall,
+                )
+            },
+            confirmButton = {
+                TextButton(onClick = {
+                    val cm = context.getSystemService(android.content.Context.CLIPBOARD_SERVICE)
+                        as android.content.ClipboardManager
+                    cm.setPrimaryClip(android.content.ClipData.newPlainText("log", text))
+                    Toast.makeText(context, "已复制", Toast.LENGTH_SHORT).show()
+                }) { Text("复制") }
+            },
+            dismissButton = {
+                TextButton(onClick = { detailText = null }) { Text("关闭") }
+            },
+        )
+    }
 }
 
-/** 规则编辑页:GKD 规则表单(name / activityIds / matches / action / actionMaximum);新建与编辑共用 */
+/** 规则编辑页:GKD 规则表单(name / activityIds / matches / action / 执行参数);新建与编辑共用 */
 
-/** GKD 动作种类(本引擎支持的子集):GKD 动作名 → 中文标签 */
-private val GKD_ACTIONS = listOf(
+/** GKD 动作名 → 中文标签(编辑器 chips 展示) */
+private val GKD_ACTION_LABELS = mapOf(
     "click" to "点击",
+    "clickNode" to "点节点",
+    "clickCenter" to "点中心",
     "longClick" to "长按",
+    "longClickNode" to "长按节点",
+    "longClickCenter" to "长按中心",
     "back" to "返回",
-    "scrollForward" to "上滑",
-    "scrollBackward" to "下滑",
+    "swipe" to "滑动",
+    "inputText" to "输入文本",
+    "launchApp" to "启动应用",
+    "check" to "勾选",
+    "uncheck" to "取消勾选",
+    "none" to "仅标记",
 )
 
 @Composable
@@ -1644,19 +1819,44 @@ private fun RuleEditorPage(
     var activityIdsText by remember {
         mutableStateOf(existing?.activityIds?.joinToString(",").orEmpty())
     }
-    var matchesExpr by remember { mutableStateOf(existing?.matches?.summary().orEmpty()) }
+    var matchesExpr by remember { mutableStateOf(existing?.rules?.firstOrNull()?.matches?.firstOrNull()?.expr.orEmpty()) }
+    // 高级字段:anyMatches / excludeMatches / 执行参数(规则级优先,空 = 用组级)
+    var anyMatchesExpr by remember {
+        mutableStateOf(existing?.rules?.firstOrNull()?.anyMatches?.firstOrNull()?.expr.orEmpty())
+    }
+    var excludeMatchesExpr by remember {
+        mutableStateOf(existing?.rules?.firstOrNull()?.excludeMatches?.firstOrNull()?.expr.orEmpty())
+    }
+    var actionCdText by remember {
+        mutableStateOf(existing?.rules?.firstOrNull()?.actionCd?.takeIf { it > 0 }?.toString().orEmpty())
+    }
+    var actionDelayText by remember {
+        mutableStateOf(existing?.rules?.firstOrNull()?.actionDelay?.takeIf { it > 0 }?.toString().orEmpty())
+    }
+    var matchTimeText by remember {
+        mutableStateOf(existing?.rules?.firstOrNull()?.matchTime?.takeIf { it > 0 }?.toString().orEmpty())
+    }
+    var resetMatchKind by remember {
+        mutableStateOf(existing?.rules?.firstOrNull()?.resetMatch ?: existing?.resetMatch ?: GkdTask.ResetMatch.Activity)
+    }
+    var fastQueryOn by remember {
+        mutableStateOf(existing?.rules?.firstOrNull()?.fastQuery ?: existing?.fastQuery ?: false)
+    }
+    var matchRootOn by remember {
+        mutableStateOf(existing?.rules?.firstOrNull()?.matchRoot ?: existing?.matchRoot ?: false)
+    }
+    var orderText by remember {
+        mutableStateOf(existing?.rules?.firstOrNull()?.order?.takeIf { it != 0L }?.toString()
+            ?: existing?.order?.takeIf { it != 0L }?.toString().orEmpty())
+    }
+    var showAdvanced by remember { mutableStateOf(false) }
     // GKD 动作名
     var actionKind by remember {
-        mutableStateOf(
-            when (val a = existing?.actions?.firstOrNull()) {
-                is Action.LongClick -> "longClick"
-                is Action.Back -> "back"
-                is Action.Swipe -> if (a.up) "scrollForward" else "scrollBackward"
-                else -> "click"
-            },
-        )
+        mutableStateOf(existing?.rules?.firstOrNull()?.action?.gkd ?: "click")
     }
-    var actionMax by remember { mutableStateOf((existing?.actions?.firstOrNull()?.repeat ?: 1).toString()) }
+    var actionMax by remember {
+        mutableStateOf((existing?.rules?.firstOrNull()?.actionMaximum?.takeIf { it > 0 } ?: 1L).toString())
+    }
 
     Column(modifier = modifier.fillMaxSize()) {
         // 顶栏:强调色返回圆钮 + 标题 + 保存
@@ -1692,31 +1892,55 @@ private fun RuleEditorPage(
             TextButton(
                 onClick = {
                     // 解析 GKD 选择器;语法错误不允许保存
-                    val sel = matchesExpr.trim().takeIf { it.isNotEmpty() }?.let {
-                        runCatching { GkdSelector.parse(it) }.getOrNull()
+                    var parseFailed = false
+                    fun parseOrNull(expr: String): GkdSelector? {
+                        val t = expr.trim()
+                        if (t.isEmpty()) return null
+                        return runCatching { GkdSelector.parse(t) }.getOrElse {
+                            Toast.makeText(context, "选择器语法错误: $t", Toast.LENGTH_SHORT).show()
+                            parseFailed = true
+                            null
+                        }
                     }
-                    if (matchesExpr.isNotBlank() && sel == null) {
-                        Toast.makeText(context, "选择器语法错误", Toast.LENGTH_SHORT).show()
+                    val sel = parseOrNull(matchesExpr)
+                    if (parseFailed) return@TextButton
+                    val anySel = parseOrNull(anyMatchesExpr)
+                    if (parseFailed) return@TextButton
+                    val excludeSel = parseOrNull(excludeMatchesExpr)
+                    if (parseFailed) return@TextButton
+                    if (sel == null && anySel == null) {
+                        Toast.makeText(context, "matches 与 anyMatches 至少填一个", Toast.LENGTH_SHORT).show()
                         return@TextButton
                     }
-                    val repeat = (actionMax.toIntOrNull() ?: 1).coerceAtLeast(1)
-                    val action: Action = when (actionKind) {
-                        "longClick" -> Action.LongClick(matches = sel ?: GkdSelector(), repeat = repeat)
-                        "back" -> Action.Back(repeat = repeat)
-                        "scrollForward" -> Action.Swipe(up = true, repeat = repeat)
-                        "scrollBackward" -> Action.Swipe(up = false, repeat = repeat)
-                        else -> Action.Click(matches = sel ?: GkdSelector(), repeat = repeat)
-                    }
+                    val action: Action = Action.entries.firstOrNull { it.gkd == actionKind } ?: Action.Click
+                    val max = (actionMax.toLongOrNull() ?: 1L).coerceAtLeast(1L)
+                    // swipe 方向编码:GKD 新版用 swipeArg;无绝对坐标时以 endY=-2 表示下滑,null=上滑
+                    val rule = GkdTask.Rule(
+                        key = existing?.rules?.firstOrNull()?.key ?: 0L,
+                        name = name.trim(),
+                        matches = listOfNotNull(sel),
+                        anyMatches = listOfNotNull(anySel),
+                        excludeMatches = listOfNotNull(excludeSel),
+                        action = action,
+                        // 本地扩展 swipeDir:2 = 下滑;GKD 标准形态用 swipeArg 表达式
+                        swipeDir = if (actionKind == "scrollBackward") 2 else null,
+                        actionMaximum = max,
+                        actionCd = actionCdText.toLongOrNull() ?: 0L,
+                        actionDelay = actionDelayText.toLongOrNull() ?: 0L,
+                        fastQuery = fastQueryOn,
+                        matchRoot = matchRootOn,
+                        matchTime = matchTimeText.toLongOrNull() ?: 0L,
+                        resetMatch = resetMatchKind,
+                        order = orderText.toLongOrNull() ?: 0L,
+                    )
                     val saved = GkdTask(
                         id = existing?.id ?: "task_${System.currentTimeMillis()}",
-                        name = name.trim().ifEmpty { action.label() },
+                        name = name.trim().ifEmpty { rule.name.ifEmpty { "规则${rule.key}" } },
                         packageName = pkg,
                         activityIds = activityIdsText.split(',', '，')
                             .map { it.trim() }.filter { it.isNotEmpty() },
                         enabled = existing?.enabled ?: true,
-                        matches = sel,
-                        actions = listOf(action),
-                        onFailure = existing?.onFailure ?: GkdTask.OnFailure.Retry(),
+                        rules = listOf(rule),
                     )
                     onSave(saved)
                     Toast.makeText(context, "规则已保存", Toast.LENGTH_SHORT).show()
@@ -1752,24 +1976,30 @@ private fun RuleEditorPage(
             SelectorExprField(
                 value = matchesExpr,
                 onChange = { matchesExpr = it },
-                label = "matches(GKD 选择器,命中即动作目标)",
+                label = "matches(GKD 选择器,全部命中)",
                 hint = "例: [text*=\"跳过\"][clickable=true];back/scroll 类动作留空 = 页面就绪即执行",
+            )
+            SelectorExprField(
+                value = anyMatchesExpr,
+                onChange = { anyMatchesExpr = it },
+                label = "anyMatches(任一命中,可选)",
+                hint = "与 matches 二选一;都填时仍以 matches 为准",
             )
             Text(
                 text = "action",
                 style = MaterialTheme.typography.titleSmall,
                 fontWeight = FontWeight.SemiBold,
             )
-            // GKD 动作种类(click/longClick/back/scrollForward/scrollBackward)
+            // GKD 全量动作
             Row(
                 modifier = Modifier.horizontalScroll(rememberScrollState()),
                 horizontalArrangement = Arrangement.spacedBy(8.dp),
             ) {
-                GKD_ACTIONS.forEach { k ->
+                Action.entries.forEach { a ->
                     FilterChip(
-                        selected = actionKind == k.first,
-                        onClick = { actionKind = k.first },
-                        label = { Text(k.second) },
+                        selected = actionKind == a.gkd,
+                        onClick = { actionKind = a.gkd },
+                        label = { Text(GKD_ACTION_LABELS[a.gkd] ?: a.gkd) },
                     )
                 }
             }
@@ -1780,13 +2010,246 @@ private fun RuleEditorPage(
                 singleLine = true,
                 modifier = Modifier.fillMaxWidth(),
             )
+            // 高级参数折叠区
+            TextButton(onClick = { showAdvanced = !showAdvanced }) {
+                Text(if (showAdvanced) "收起高级参数" else "高级参数(冷却/延迟/重置等)")
+            }
+            if (showAdvanced) {
+                OutlinedTextField(
+                    value = actionCdText,
+                    onValueChange = { actionCdText = it.filter { c -> c.isDigit() } },
+                    label = { Text("actionCd(冷却 ms,0 = 默认 1000)") },
+                    singleLine = true,
+                    modifier = Modifier.fillMaxWidth(),
+                )
+                OutlinedTextField(
+                    value = actionDelayText,
+                    onValueChange = { actionDelayText = it.filter { c -> c.isDigit() } },
+                    label = { Text("actionDelay(延迟执行 ms)") },
+                    singleLine = true,
+                    modifier = Modifier.fillMaxWidth(),
+                )
+                OutlinedTextField(
+                    value = matchTimeText,
+                    onValueChange = { matchTimeText = it.filter { c -> c.isDigit() } },
+                    label = { Text("matchTime(匹配时间窗 ms,0 = 不限)") },
+                    singleLine = true,
+                    modifier = Modifier.fillMaxWidth(),
+                )
+                OutlinedTextField(
+                    value = orderText,
+                    onValueChange = { orderText = it.filter { c -> c.isDigit() } },
+                    label = { Text("order(匹配顺序,越小越先)") },
+                    singleLine = true,
+                    modifier = Modifier.fillMaxWidth(),
+                )
+                Text("resetMatch(休眠重置策略)", style = MaterialTheme.typography.titleSmall)
+                Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                    GkdTask.ResetMatch.entries.forEach { rm ->
+                        FilterChip(
+                            selected = resetMatchKind == rm,
+                            onClick = { resetMatchKind = rm },
+                            label = { Text(rm.gkd) },
+                        )
+                    }
+                }
+                Row(horizontalArrangement = Arrangement.spacedBy(24.dp)) {
+                    Row(verticalAlignment = Alignment.CenterVertically) {
+                        Switch(checked = fastQueryOn, onCheckedChange = { fastQueryOn = it })
+                        Spacer(Modifier.width(8.dp))
+                        Text("fastQuery")
+                    }
+                    Row(verticalAlignment = Alignment.CenterVertically) {
+                        Switch(checked = matchRootOn, onCheckedChange = { matchRootOn = it })
+                        Spacer(Modifier.width(8.dp))
+                        Text("matchRoot")
+                    }
+                }
+                SelectorExprField(
+                    value = excludeMatchesExpr,
+                    onChange = { excludeMatchesExpr = it },
+                    label = "excludeMatches(命中即跳过本规则,可选)",
+                    hint = "例: [vid=\"close_btn\"] 存在时不执行",
+                )
+            }
             Text(
-                text = "GKD 语义:matches 命中的节点即动作目标;back / scrollForward / scrollBackward 为全局动作,无需选择器。",
+                text = "GKD 语义:matches 命中的节点即动作目标;back / swipe 为全局动作,无需选择器。",
                 style = MaterialTheme.typography.bodySmall,
                 color = MaterialTheme.colorScheme.onSurfaceVariant,
             )
         }
     }
+}
+
+/** 远程订阅管理弹窗:URL 列表 / 添加 / 刷新 / 删除,拉取后解析合并进规则表(GKD 订阅同款) */
+@Composable
+private fun SubscriptionManageDialog(
+    onDismiss: () -> Unit,
+) {
+    val context = androidx.compose.ui.platform.LocalContext.current
+    val scope = rememberCoroutineScope()
+    var subs by remember { mutableStateOf(SubscriptionStore.loadAll(context)) }
+    var urlInput by remember { mutableStateOf("") }
+    var loading by remember { mutableStateOf(false) }
+    // 展开查看订阅内 app 清单的订阅 id
+    var expandedId by remember { mutableStateOf<String?>(null) }
+
+    fun fetchAndImport(sub: SubscriptionStore.Subscription) {
+        loading = true
+        LogStore.log("⬇ 订阅拉取开始: ${sub.url.ifEmpty { sub.name }}")
+        scope.launch {
+            val t0 = System.currentTimeMillis()
+            val raw = try { SubscriptionFetcher.fetch(sub.url) } catch (e: Exception) {
+                loading = false
+                LogStore.log("✕ 订阅拉取失败(${System.currentTimeMillis() - t0}ms): ${e.message} @ ${sub.url}")
+                Toast.makeText(context, "拉取失败: ${e.message}", Toast.LENGTH_LONG).show()
+                return@launch
+            }
+            LogStore.log("⬇ 订阅已拉取: ${raw.length / 1024}KB,耗时 ${System.currentTimeMillis() - t0}ms")
+            // 解析 1MB+ 的订阅很耗时,放 Default 线程;失败不崩溃:保存原文供排查,提示具体错误
+            val t1 = System.currentTimeMillis()
+            val parsed = withContext(kotlinx.coroutines.Dispatchers.Default) {
+                runCatching { GkdSubscription.parse(raw) }
+            }.getOrElse { e ->
+                loading = false
+                LogStore.log("✕ 订阅解析失败(${System.currentTimeMillis() - t1}ms): ${e.message}")
+                SubscriptionStore.upsert(
+                    context,
+                    sub.copy(raw = raw, name = sub.name.ifEmpty { sub.url.substringAfterLast('/') }, lastUpdate = System.currentTimeMillis()),
+                )
+                subs = SubscriptionStore.loadAll(context)
+                Toast.makeText(context, "订阅已保存,但解析失败: ${e.message}", Toast.LENGTH_LONG).show()
+                return@launch
+            }
+            LogStore.log(
+                "✓ 订阅解析完成(${System.currentTimeMillis() - t1}ms): " +
+                    "${parsed.tasks.size} 条规则组,跳过 ${parsed.skipped.size} 项" +
+                    parsed.skipped.take(3).joinToString(";") { "「$it」" }.let { if (it.isNotEmpty()) " — $it" else "" },
+            )
+            val name = Regex("""["']name["']\s*:\s*["']([^"']+)["']""").find(raw)
+                ?.groupValues?.get(1) ?: sub.url.substringAfterLast('/')
+            val version = Regex("\"version\"\\s*:\\s*(\\d+)").find(raw)
+                ?.groupValues?.get(1)?.toLongOrNull() ?: 0L
+            val updated = sub.copy(raw = raw, name = name, version = version, lastUpdate = System.currentTimeMillis())
+            SubscriptionStore.upsert(context, updated)
+            subs = SubscriptionStore.loadAll(context)
+            // 规则表合并落盘同样在 IO(SharedPreferences 写入 + 序列化)
+            val t2 = System.currentTimeMillis()
+            val merged = withContext(kotlinx.coroutines.Dispatchers.IO) {
+                SubscriptionStore.import(context, updated, parsed)
+                TaskStore.loadAll(context)
+            }
+            LogStore.log("✓ 规则已合并落盘: 「$name」v$version,共 ${parsed.tasks.size} 条,落盘 ${System.currentTimeMillis() - t2}ms")
+            // 同步:引擎立即换表 + 通知应用页重载(此协程在 Main 上,可直接调服务)
+            DramaAccessibilityService.instance?.taskRunner?.setTasks(merged)
+            DramaAccessibilityService.instance?.refreshTaskTriggers()
+            RuleSync.version++
+            loading = false
+            Toast.makeText(
+                context,
+                "已导入 ${parsed.tasks.size} 条规则" +
+                    parsed.skipped.takeIf { it.isNotEmpty() }?.joinToString(";") { it }?.let { "\n跳过:$it" }.orEmpty(),
+                Toast.LENGTH_LONG,
+            ).show()
+        }
+    }
+
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        title = { Text("远程订阅") },
+        text = {
+            Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                    OutlinedTextField(
+                        value = urlInput,
+                        onValueChange = { urlInput = it },
+                        label = { Text("订阅 URL(JSON5)") },
+                        singleLine = true,
+                        modifier = Modifier.weight(1f),
+                    )
+                    TextButton(
+                        onClick = {
+                            val url = urlInput.trim()
+                            if (url.isEmpty()) return@TextButton
+                            fetchAndImport(SubscriptionStore.Subscription(id = "s${System.currentTimeMillis()}", url = url, name = ""))
+                            urlInput = ""
+                        },
+                        enabled = !loading && urlInput.isNotBlank(),
+                    ) { Text("添加") }
+                }
+                if (loading) Text("拉取中…", style = MaterialTheme.typography.bodySmall)
+                if (subs.isEmpty()) {
+                    Text("暂无订阅。粘贴 GKD 订阅链接(如 .json5/raw 地址)添加。", style = MaterialTheme.typography.bodySmall)
+                }
+                subs.forEach { sub ->
+                    Column {
+                        // 订阅行:点按展开/收起订阅内 app 清单
+                        Row(
+                            verticalAlignment = Alignment.CenterVertically,
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .clickable { expandedId = if (expandedId == sub.id) null else sub.id },
+                        ) {
+                            Column(modifier = Modifier.weight(1f)) {
+                                Text(sub.name.ifEmpty { sub.url }, style = MaterialTheme.typography.bodyMedium, maxLines = 1, overflow = TextOverflow.Ellipsis)
+                                Text("v${sub.version} · ${sub.url}", style = MaterialTheme.typography.bodySmall, maxLines = 1, overflow = TextOverflow.Ellipsis)
+                            }
+                            TextButton(onClick = { fetchAndImport(sub) }, enabled = !loading) { Text("刷新") }
+                            TextButton(onClick = {
+                                SubscriptionStore.remove(context, sub.id)
+                                // 同步移除该订阅导入的规则
+                                val cur = TaskStore.loadAll(context)
+                                TaskStore.saveAll(context, cur.filterNot { it.id.startsWith("sub_${sub.id}_") })
+                                subs = SubscriptionStore.loadAll(context)
+                            }) { Text("删除", color = MaterialTheme.colorScheme.error) }
+                        }
+                        // 展开区:订阅内 app 清单,未安装的灰色展示
+                        if (expandedId == sub.id) {
+                            val apps = remember(sub.id, sub.raw) { GkdSubscription.appsOf(sub.raw) }
+                            if (apps.isEmpty()) {
+                                Text(
+                                    "未解析到应用(订阅无 apps 或内容为空)",
+                                    style = MaterialTheme.typography.bodySmall,
+                                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                    modifier = Modifier.padding(start = 8.dp, bottom = 4.dp),
+                                )
+                            } else {
+                                apps.forEach { (appId, appName) ->
+                                    // 未安装检测:PackageManager 查不到即置灰
+                                    val installed = remember(appId) {
+                                        runCatching { context.packageManager.getPackageInfo(appId, 0) }.isSuccess
+                                    }
+                                    Row(
+                                        verticalAlignment = Alignment.CenterVertically,
+                                        modifier = Modifier.padding(start = 8.dp, top = 2.dp, bottom = 2.dp),
+                                    ) {
+                                        StatusDot(active = installed, accent = MaterialTheme.colorScheme.primary, size = 7.dp)
+                                        Spacer(modifier = Modifier.width(8.dp))
+                                        Text(
+                                            text = appName,
+                                            style = MaterialTheme.typography.bodySmall,
+                                            color = if (installed) MaterialTheme.colorScheme.onSurface else MaterialTheme.colorScheme.outline,
+                                            maxLines = 1,
+                                            overflow = TextOverflow.Ellipsis,
+                                        )
+                                        if (!installed) {
+                                            Spacer(modifier = Modifier.width(6.dp))
+                                            Text(
+                                                "未安装",
+                                                style = MaterialTheme.typography.labelSmall,
+                                                color = MaterialTheme.colorScheme.outline,
+                                            )
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        },
+        confirmButton = { TextButton(onClick = onDismiss) { Text("完成") } },
+    )
 }
 
 /** GKD 选择器表达式输入框:实时校验语法,错误时标红提示 */
@@ -1859,6 +2322,7 @@ private data class PermissionItem(
  * 自启动/后台运行检测:AppOpsManager 的 OP_RUN_ANY_IN_BACKGROUND(op 编号 43,API 28+)。
  * 无独立「自启动」权限,各 ROM 的自启动开关最终都落到此 op;查询失败时返回 false(显示未授权)。
  */
+@Suppress("DEPRECATION") // 平台无替代公开 API:公开的 unsafeCheckOpNoThrow(字符串 op 名)本身即弃用,仅此途径可查
 private fun queryAutoStartAllowed(context: android.content.Context): Boolean {
     return runCatching {
         val am = context.getSystemService(android.app.AppOpsManager::class.java) ?: return false
