@@ -66,4 +66,9 @@
     <string name="crash_action_exit">退出</string>
     <string name="crash_copy_done">崩溃日志已复制到剪贴板</string>
     <string name="crash_copy_failed">复制失败</string>
+    <!-- 红色错误卡片提示:点按/长按复制 -->
+    <string name="crash_hint_tap_copy">点按复制错误信息</string>
+    <!-- 元信息行(键左值右布局,键在代码里,值含动态参数) -->
+    <string name="crash_detail_device_value">%1$s · API %2$d</string>
+    <string name="crash_detail_version_value">%1$s (%2$d)</string>
 </resources>

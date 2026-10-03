@@ -211,10 +211,11 @@ class OverlayDebugWindow(private val service: AccessibilityService) {
                 selectedIndex = -1
                 return
             }
-            // 标题:立即显示(不等待查询)——先取事件缓存的 Activity,没有则用窗口包名,
-            // 永不出现 Unknown/空白;随后后台线程反射查询真实前台 Activity,查到即回填替换
+            // 标题:立即显示(不等待查询)——事件缓存的 Activity 须与当前窗口包名一致才可信
+            // (刚切换应用、事件未到时缓存是上一个应用的,GKD 同款包名校验),否则用窗口包名占位
             captureGeneration++
             val cached = (service as? com.example.composedemo.automation.DramaAccessibilityService)?.lastActivity
+                ?.takeIf { it.packageName == root.packageName }
             val title = cached?.let { formatTitle(it) }
                 ?: root.packageName?.let { pkg -> "$pkg(未知 Activity)" }
                 ?: "Unknown"
@@ -238,14 +239,21 @@ class OverlayDebugWindow(private val service: AccessibilityService) {
             setLayerVisible(cardLp, cardView, false)      // 信息卡片保持隐藏
             selectedIndex = 0           // 根节点仅在内部选中,不弹卡片
 
-            // 后台查询(反射 binder 调用不能在主线程),完成后主线程替换标题
+            // 后台查询(反射 binder 调用不能在主线程),完成后主线程替换标题;
+            // 两次短重试:切换瞬间系统侧任务栈可能尚未就绪,getTasks 返回旧值/null
             val generation = captureGeneration
             Thread {
-                val top = runCatching { queryTopActivityViaReflection() }.getOrNull() ?: return@Thread
+                var top: android.content.ComponentName? = null
+                repeat(2) {
+                    top = runCatching { queryTopActivityViaReflection() }.getOrNull()
+                    if (top != null) return@repeat
+                    Thread.sleep(150)
+                }
+                val result = top ?: return@Thread
                 mainHandler.post {
                     // 只替换本次抓取的标题;期间用户重新抓取过(generation 变化)则丢弃
                     if (generation == captureGeneration && captureEnabled) {
-                        val newTitle = formatTitle(top)
+                        val newTitle = formatTitle(result)
                         if (newTitle != lastAppName) {
                             titleView?.text = newTitle
                             lastAppName = newTitle

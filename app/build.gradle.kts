@@ -26,14 +26,21 @@ android {
     }
 
     buildTypes {
+        debug {
+            // debug 构建独立包名 + 版本/应用名后缀,与 release 可并存安装互不覆盖
+            applicationIdSuffix = ".debug"
+            versionNameSuffix = "-debug"
+            resValue("string", "app_name", "自动化助手 Debug")
+        }
         release {
             isMinifyEnabled = true
             isShrinkResources = true
-            signingConfig = signingConfigs.getByName("release")
+            // AGP 8.x+ 默认 R8 full mode;显式声明防止全局 gradle.properties 覆盖回 compat 模式
             proguardFiles(
                 getDefaultProguardFile("proguard-android-optimize.txt"),
                 "proguard-rules.pro"
             )
+            signingConfig = signingConfigs.getByName("release")
         }
     }
 
@@ -44,6 +51,8 @@ android {
 
     buildFeatures {
         compose = true
+        // buildTypes.debug 的 resValue(app_name 后缀)需要开 resValues
+        resValues = true
     }
 }
 

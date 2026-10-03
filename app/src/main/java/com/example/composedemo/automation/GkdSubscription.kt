@@ -78,7 +78,8 @@ object GkdSubscription {
         name = g.name,
         key = g.key.toLong(),
         packageName = appId,
-        enabled = g.enable ?: true,
+        // 导入的规则组默认关闭:由用户逐组审阅后手动开启(避免订阅静默接管点击)
+        enabled = g.enable ?: false,
         desc = g.desc,
         activityIds = g.activityIds ?: emptyList(),
         excludeActivityIds = g.excludeActivityIds ?: emptyList(),
@@ -107,7 +108,7 @@ object GkdSubscription {
         name = g.name,
         key = g.key.toLong(),
         packageName = "", // 空 = 全局规则
-        enabled = g.enable ?: true,
+        enabled = g.enable ?: false, // 默认关闭,同应用组
         desc = g.desc,
         rules = g.rules.map { ruleFromRaw(it) },
         actionCd = g.actionCd ?: 1000L,

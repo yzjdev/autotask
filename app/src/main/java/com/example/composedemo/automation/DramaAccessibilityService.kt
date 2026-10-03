@@ -73,10 +73,9 @@ open class DramaAccessibilityService : AccessibilityService() {
     // 一像素完全透明悬浮窗:触摸穿透,不遮挡不影响任何操作
     private var pixelView: View? = null
 
-    /** 显示一像素透明悬浮窗(触摸穿透) */
+    /** 显示一像素透明悬浮窗(触摸穿透;TYPE_ACCESSIBILITY_OVERLAY 无需悬浮窗权限) */
     private fun showPixelOverlay() {
         if (pixelView != null) return
-        if (!Settings.canDrawOverlays(this)) return
         val wm = getSystemService(WindowManager::class.java) ?: return
         val lp = WindowManager.LayoutParams(
             1, 1,

@@ -34,10 +34,10 @@
     <uses-permission android:name="android.permission.INTERNET" />
 
     <!--
-        SYSTEM_ALERT_WINDOW:系统 Alert 悬浮窗(TYPE_APPLICATION_OVERLAY)所需,
-        由用户在系统设置「显示在其他应用上层」中手动授权。
+        SYSTEM_ALERT_WINDOW 已移除:悬浮窗(OverlayDebugWindow/OverlayToggleWindow/
+        showPixelOverlay)全部使用 TYPE_ACCESSIBILITY_OVERLAY,属于无障碍服务
+        自带能力,不需要悬浮窗权限,也无需 canDrawOverlays。
     -->
-    <uses-permission android:name="android.permission.SYSTEM_ALERT_WINDOW" />
 
     <!--
         REQUEST_IGNORE_BATTERY_OPTIMIZATIONS:主页「权限管理」卡片直接拉起

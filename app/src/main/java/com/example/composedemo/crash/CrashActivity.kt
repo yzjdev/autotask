@@ -4,15 +4,16 @@ import android.app.Activity
 import android.content.ClipboardManager
 import android.content.ClipData
 import android.content.Intent
-import android.content.res.Configuration
 import android.graphics.Color
 import android.graphics.Typeface
 import android.graphics.drawable.ColorDrawable
 import android.graphics.drawable.GradientDrawable
+import android.graphics.drawable.RippleDrawable
 import android.os.Build
 import android.os.Bundle
-import android.os.Looper
 import android.os.Process
+import android.text.TextUtils
+import android.util.TypedValue
 import android.view.Gravity
 import android.view.View
 import android.view.Window
@@ -25,6 +26,24 @@ import android.widget.TextView
 import android.widget.Toast
 import com.example.composedemo.MainActivity
 import com.example.composedemo.R
+
+/*
+ * 崩溃页视觉常量(暗色底 + 红色强调):
+ * 设计意图 —— 崩溃是异常状态,页面本身就该"看起来不对劲";
+ * 深底减少刺眼感,红色只用于错误内容与主操作,视觉动线:错误 → 复制/重启。
+ */
+private val PAGE_BG = Color.parseColor("#0D0D0F")
+private val CARD_BG = Color.parseColor("#16181C")
+private val CHIP_BG = Color.parseColor("#1F2228")
+private val DIVIDER = Color.parseColor("#2A2E35")
+private val TEXT_PRIMARY = Color.parseColor("#F2F3F5")
+private val TEXT_SECONDARY = Color.parseColor("#9AA0A8")
+private val TEXT_TERTIARY = Color.parseColor("#6B7280")
+private val RED_ACCENT = Color.parseColor("#F87171")
+private val RED_ERROR = Color.parseColor("#FCA5A5")
+private val RED_ERROR_BG = Color.parseColor("#2A1517")
+private val RED_BTN = Color.parseColor("#DC2626")
+private val MONO: Typeface = Typeface.create("monospace", Typeface.NORMAL)
 
 /**
  * 崩溃页。
@@ -70,13 +89,13 @@ class CrashActivity : Activity() {
 
     private fun setupWindow() {
         requestWindowFeature(Window.FEATURE_NO_TITLE)
-        window.setBackgroundDrawable(ColorDrawable(Color.WHITE))
+        window.setBackgroundDrawable(ColorDrawable(PAGE_BG))
         window.clearFlags(WindowManager.LayoutParams.FLAG_DIM_BEHIND)
     }
 
     private fun buildLayout(info: CrashInfo): View {
         val screen = FrameLayout(this).apply {
-            setBackgroundColor(Color.WHITE)
+            setBackgroundColor(PAGE_BG)
             isClickable = true // 吞掉触摸,避免穿透到下层窗口
         }
 
@@ -88,8 +107,7 @@ class CrashActivity : Activity() {
 
         val card = LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL
-            setPadding(dp(28), dp(32), dp(28), dp(28))
-            background = roundedBackground(dp(20), Color.parseColor("#F7F8FA"))
+            setPadding(dp(20), dp(28), dp(20), dp(24))
         }
         scroll.addView(
             card,
@@ -106,12 +124,13 @@ class CrashActivity : Activity() {
             ),
         )
 
+        // 顶部:图标 + 标题 + 副标题
         card.addView(
             TextView(this).apply {
-                text = getString(R.string.crash_warning_symbol)
+                text = "⚠️"
                 gravity = Gravity.CENTER_HORIZONTAL
-                textSize = 40f
-                setPadding(0, dp(4), 0, dp(16))
+                textSize = 44f
+                setPadding(0, dp(4), 0, dp(12))
             },
         )
         card.addView(
@@ -119,124 +138,148 @@ class CrashActivity : Activity() {
                 text = getString(R.string.crash_title)
                 gravity = Gravity.CENTER_HORIZONTAL
                 setTypeface(null, Typeface.BOLD)
-                textSize = 22f
-                setTextColor(Color.parseColor("#1A1A1A"))
-                setPadding(0, 0, 0, dp(8))
+                textSize = 21f
+                setTextColor(TEXT_PRIMARY)
+                setPadding(0, 0, 0, dp(6))
             },
         )
         card.addView(
             TextView(this).apply {
                 text = getString(R.string.crash_subtitle)
                 gravity = Gravity.CENTER_HORIZONTAL
-                textSize = 14f
-                setTextColor(Color.parseColor("#6B7280"))
-                setPadding(0, 0, 0, dp(20))
+                textSize = 13f
+                setTextColor(TEXT_SECONDARY)
+                setPadding(0, 0, 0, dp(18))
             },
         )
-        card.addView(
+
+        // 红色错误卡片:摘要一行 + 完整堆栈;点按/长按均可复制
+        val errorBox = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            background = roundedBackground(dp(14), RED_ERROR_BG)
+            setPadding(dp(14), dp(12), dp(14), dp(12))
+            // 点击整卡复制红色错误内容(摘要 + 堆栈)
+            setOnClickListener { copyError(info) }
+            isClickable = true
+            isLongClickable = true
+            setOnLongClickListener { copyError(info); true }
+        }
+        errorBox.addView(
             TextView(this).apply {
                 text = info.summary
-                gravity = Gravity.CENTER_HORIZONTAL
                 setTypeface(null, Typeface.BOLD)
-                textSize = 15f
-                setTextColor(Color.parseColor("#DC2626"))
-                maxLines = 4
-                ellipsize = android.text.TextUtils.TruncateAt.END
-                setPadding(0, 0, 0, dp(14))
-            },
-        )
-
-        // 详情卡片
-        val detailBox = LinearLayout(this).apply {
-            orientation = LinearLayout.VERTICAL
-            background = roundedBackground(dp(12), Color.parseColor("#EEF0F3"))
-            setPadding(dp(16), dp(14), dp(16), dp(14))
-        }
-        detailBox.addView(
-            TextView(this).apply {
-                text = getString(R.string.crash_detail_time, info.formattedTime)
-                textSize = 12f
-                setTextColor(Color.parseColor("#374151"))
+                textSize = 14f
+                setTextColor(RED_ERROR)
+                maxLines = 3
+                ellipsize = TextUtils.TruncateAt.END
+                setTextIsSelectable(false)
                 setPadding(0, 0, 0, dp(4))
             },
         )
-        detailBox.addView(
+        errorBox.addView(
             TextView(this).apply {
-                text = getString(R.string.crash_detail_device, info.deviceId, info.apiLevel)
-                textSize = 12f
-                setTextColor(Color.parseColor("#374151"))
-                setPadding(0, 0, 0, dp(4))
+                text = getString(R.string.crash_hint_tap_copy)
+                textSize = 11f
+                setTextColor(Color.parseColor("#B87A7A"))
+                setPadding(0, 0, 0, dp(8))
             },
         )
-        detailBox.addView(
-            TextView(this).apply {
-                text = getString(R.string.crash_detail_version, info.versionName, info.versionCode)
-                textSize = 12f
-                setTextColor(Color.parseColor("#374151"))
-                setPadding(0, 0, 0, dp(4))
-            },
-        )
-        detailBox.addView(
-            TextView(this).apply {
-                text = getString(R.string.crash_detail_thread, info.threadName ?: "unknown")
-                textSize = 12f
-                setTextColor(Color.parseColor("#374151"))
-                setPadding(0, 0, 0, dp(10))
-            },
-        )
-        detailBox.addView(
+        errorBox.addView(
             TextView(this).apply {
                 val stack = info.stackTrace ?: getString(R.string.crash_no_stack)
-                text = if (stack.length > 800) stack.take(800) + "…" else stack
-                setTextIsSelectable(true)
-                // Typeface.MONOSPACE 是 int 字体族常量,不是 Typeface 对象,
-                // 需经 Typeface.create 转换,否则解析到 (Typeface, Int) 重载而报错
-                typeface = Typeface.create("monospace", Typeface.NORMAL)
+                text = if (stack.length > 2000) stack.take(2000) + "…" else stack
+                // 文本可长按自由选择;整卡点击复制作为快捷路径
+                setTextIsSelectable(false)
+                typeface = MONO
                 textSize = 11f
-                setTextColor(Color.parseColor("#111827"))
+                setTextColor(RED_ERROR)
+                maxLines = 12
+                ellipsize = TextUtils.TruncateAt.END
+                setLineSpacing(dp(2).toFloat(), 1f)
             },
         )
-        card.addView(detailBox)
+        card.addView(errorBox)
 
+        // 元信息卡片:时间 / 设备 / 版本 / 线程,键左值右
+        val metaBox = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            background = roundedBackground(dp(14), CHIP_BG)
+            setPadding(dp(14), dp(10), dp(14), dp(10))
+        }
+        fun metaRow(label: String, value: String, last: Boolean = false) {
+            val row = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL }
+            row.addView(
+                TextView(this).apply {
+                    text = label
+                    textSize = 12f
+                    setTextColor(TEXT_TERTIARY)
+                },
+                LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 0f)
+                    .apply { width = dp(52) },
+            )
+            row.addView(
+                TextView(this).apply {
+                    text = value
+                    textSize = 12f
+                    setTextColor(TEXT_SECONDARY)
+                    maxLines = 1
+                    ellipsize = TextUtils.TruncateAt.MIDDLE
+                },
+                LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f),
+            )
+            metaBox.addView(row, LinearLayout.LayoutParams(
+                LinearLayout.LayoutParams.MATCH_PARENT, LinearLayout.LayoutParams.WRAP_CONTENT,
+            ).apply { setMargins(0, 0, 0, if (last) 0 else dp(6)) })
+        }
+        metaRow("时间", info.formattedTime)
+        metaRow("设备", getString(R.string.crash_detail_device_value, info.deviceId, info.apiLevel))
+        metaRow("版本", getString(R.string.crash_detail_version_value, info.versionName, info.versionCode))
+        metaRow("线程", info.threadName ?: "unknown", last = true)
         card.addView(
-            View(this).apply {
-                layoutParams = LinearLayout.LayoutParams(
-                    LinearLayout.LayoutParams.MATCH_PARENT, dp(20),
-                )
-            },
+            metaBox,
+            LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, LinearLayout.LayoutParams.WRAP_CONTENT)
+                .apply { topMargin = dp(12) },
         )
 
-        // 按钮
+        // 按钮:复制(描边)/ 重启(红色主按钮)/ 退出(次要),重启在视觉中心
         val copyButton = Button(this).apply {
             id = R.id.crash_button_copy
             text = getString(R.string.crash_action_copy)
-            setTextColor(Color.parseColor("#DC2626"))
-            background = roundedBackground(dp(12), Color.parseColor("#FEE2E2"))
+            setTextColor(RED_ACCENT)
+            textSize = 14f
             isAllCaps = false
+            background = rippleBackground(dp(12), Color.TRANSPARENT, strokeColor = 0x66F87171)
         }
         val restartButton = Button(this).apply {
             id = R.id.crash_button_restart
             text = getString(R.string.crash_action_restart)
             setTextColor(Color.WHITE)
-            background = roundedBackground(dp(12), Color.parseColor("#DC2626"))
+            textSize = 14f
+            setTypeface(null, Typeface.BOLD)
             isAllCaps = false
+            background = rippleBackground(dp(12), RED_BTN)
         }
         val exitButton = Button(this).apply {
             id = R.id.crash_button_exit
             text = getString(R.string.crash_action_exit)
-            setTextColor(Color.parseColor("#6B7280"))
-            background = roundedBackground(dp(12), Color.parseColor("#F3F4F6"))
+            setTextColor(TEXT_SECONDARY)
+            textSize = 14f
             isAllCaps = false
+            background = rippleBackground(dp(12), CHIP_BG)
         }
 
-        val buttonRow = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL }
-        buttonRow.addView(copyButton, LinearLayout.LayoutParams(0, dp(48), 1f).apply { marginEnd = dp(10) })
-        buttonRow.addView(restartButton, LinearLayout.LayoutParams(0, dp(48), 1f))
-        buttonRow.addView(exitButton, LinearLayout.LayoutParams(
-            LinearLayout.LayoutParams.MATCH_PARENT, dp(48),
-        ).apply { topMargin = dp(12) })
-
-        card.addView(buttonRow)
+        val buttonRow = LinearLayout(this).apply {
+            orientation = LinearLayout.HORIZONTAL
+            gravity = Gravity.CENTER_VERTICAL
+        }
+        buttonRow.addView(copyButton, LinearLayout.LayoutParams(0, dp(46), 1f).apply { marginEnd = dp(10) })
+        buttonRow.addView(restartButton, LinearLayout.LayoutParams(0, dp(46), 1f).apply { marginEnd = dp(10) })
+        buttonRow.addView(exitButton, LinearLayout.LayoutParams(0, dp(46), 1f))
+        card.addView(
+            buttonRow,
+            LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, LinearLayout.LayoutParams.WRAP_CONTENT)
+                .apply { topMargin = dp(20) },
+        )
         return screen
     }
 
@@ -247,10 +290,23 @@ class CrashActivity : Activity() {
     }
 
     private fun copyToClipboard(info: CrashInfo) {
+        copyToClipboardInternal(info.fullLog, R.string.crash_copy_done)
+    }
+
+    /** 复制红色错误卡片内容:错误摘要 + 堆栈(比 fullLog 更聚焦) */
+    private fun copyError(info: CrashInfo) {
+        val text = buildString {
+            append(info.summary)
+            if (info.stackTrace != null) appendLine().append(info.stackTrace)
+        }
+        copyToClipboardInternal(text, R.string.crash_copy_done)
+    }
+
+    private fun copyToClipboardInternal(text: String, doneRes: Int) {
         try {
             val cm = getSystemService(CLIPBOARD_SERVICE) as ClipboardManager
-            cm.setPrimaryClip(ClipData.newPlainText("crash_log", info.fullLog))
-            toast(getString(R.string.crash_copy_done))
+            cm.setPrimaryClip(ClipData.newPlainText("crash_log", text))
+            toast(getString(doneRes))
         } catch (t: Throwable) {
             toast(getString(R.string.crash_copy_failed))
         }
@@ -296,6 +352,20 @@ class CrashActivity : Activity() {
             setColor(color)
             cornerRadius = radiusDp * resources.displayMetrics.density
         }
+
+    /** 按钮背景:圆角 + 可选描边 + 涟漪反馈(API 21+) */
+    private fun rippleBackground(radiusDp: Int, fillColor: Int, strokeColor: Int? = null): RippleDrawable {
+        val content = GradientDrawable().apply {
+            setColor(fillColor)
+            cornerRadius = radiusDp * resources.displayMetrics.density
+            strokeColor?.let {
+                setStroke(dp(1), it)
+            }
+        }
+        return RippleDrawable(android.content.res.ColorStateList.valueOf(Color.parseColor("#33FFFFFF")), content, null)
+    }
+
+    private fun dpF(value: Int): Float = value * resources.displayMetrics.density
 
     companion object {
         private const val TAG = "CrashActivity"
