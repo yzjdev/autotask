@@ -1,4 +1,4 @@
-package com.example.composedemo.ui.theme
+package com.yzjdev.autogkd.ui.theme
 
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material3.Shapes

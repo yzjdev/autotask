@@ -1,4 +1,4 @@
-package com.example.composedemo.ui.theme
+package com.yzjdev.autogkd.ui.theme
 
 import androidx.compose.material3.Typography
 import androidx.compose.ui.text.TextStyle

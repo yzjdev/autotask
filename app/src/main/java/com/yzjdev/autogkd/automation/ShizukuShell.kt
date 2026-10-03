@@ -1,4 +1,4 @@
-package com.example.composedemo.automation
+package com.yzjdev.autogkd.automation
 
 import moe.shizuku.server.IRemoteProcess
 import moe.shizuku.server.IShizukuService

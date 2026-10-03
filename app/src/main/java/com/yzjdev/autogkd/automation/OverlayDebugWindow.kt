@@ -1,4 +1,4 @@
-package com.example.composedemo.automation
+package com.yzjdev.autogkd.automation
 
 import android.accessibilityservice.AccessibilityService
 import android.annotation.SuppressLint
@@ -135,7 +135,7 @@ class OverlayDebugWindow(private val service: AccessibilityService) {
             ensureInfoCard(lastAppName)
             cardView?.visibility = View.GONE
             // 订阅前台 Activity 切换,标题实时跟随(悬浮窗显示期间)
-            (service as? com.example.composedemo.automation.DramaAccessibilityService)
+            (service as? com.yzjdev.autogkd.automation.DramaAccessibilityService)
                 ?.addActivityListener(activityListener)
             // 悬浮球最后创建,天然位于最上层
             toggleWindow.show()
@@ -144,7 +144,7 @@ class OverlayDebugWindow(private val service: AccessibilityService) {
 
     fun hide() {
         mainHandler.post {
-            (service as? com.example.composedemo.automation.DramaAccessibilityService)
+            (service as? com.yzjdev.autogkd.automation.DramaAccessibilityService)
                 ?.removeActivityListener(activityListener)
             removeCaptureViews()
             toggleWindow.hide()
@@ -214,7 +214,7 @@ class OverlayDebugWindow(private val service: AccessibilityService) {
             // 标题:立即显示(不等待查询)——事件缓存的 Activity 须与当前窗口包名一致才可信
             // (刚切换应用、事件未到时缓存是上一个应用的,GKD 同款包名校验),否则用窗口包名占位
             captureGeneration++
-            val cached = (service as? com.example.composedemo.automation.DramaAccessibilityService)?.lastActivity
+            val cached = (service as? com.yzjdev.autogkd.automation.DramaAccessibilityService)?.lastActivity
                 ?.takeIf { it.packageName == root.packageName }
             val title = cached?.let { formatTitle(it) }
                 ?: root.packageName?.let { pkg -> "$pkg(未知 Activity)" }

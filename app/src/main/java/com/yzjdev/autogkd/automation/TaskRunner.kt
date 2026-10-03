@@ -1,4 +1,4 @@
-package com.example.composedemo.automation
+package com.yzjdev.autogkd.automation
 
 import android.view.accessibility.AccessibilityNodeInfo
 import kotlinx.coroutines.CoroutineScope

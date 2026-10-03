@@ -1,4 +1,4 @@
-package com.example.composedemo
+package com.yzjdev.autogkd
 
 import android.content.Intent
 import android.net.Uri
@@ -147,19 +147,19 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.flow.drop
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
-import com.example.composedemo.automation.AutomationManager
-import com.example.composedemo.automation.DramaAccessibilityService
-import com.example.composedemo.automation.ShizukuShell
-import com.example.composedemo.automation.LogStore
-import com.example.composedemo.automation.NetPolicyStore
-import com.example.composedemo.automation.GkdSelector
-import com.example.composedemo.automation.Action
-import com.example.composedemo.automation.GkdTask
-import com.example.composedemo.automation.GkdSubscription
-import com.example.composedemo.automation.SubscriptionFetcher
-import com.example.composedemo.automation.SubscriptionStore
-import com.example.composedemo.automation.TaskStore
-import com.example.composedemo.ui.theme.ComposeDemoTheme
+import com.yzjdev.autogkd.automation.AutomationManager
+import com.yzjdev.autogkd.automation.DramaAccessibilityService
+import com.yzjdev.autogkd.automation.ShizukuShell
+import com.yzjdev.autogkd.automation.LogStore
+import com.yzjdev.autogkd.automation.NetPolicyStore
+import com.yzjdev.autogkd.automation.GkdSelector
+import com.yzjdev.autogkd.automation.Action
+import com.yzjdev.autogkd.automation.GkdTask
+import com.yzjdev.autogkd.automation.GkdSubscription
+import com.yzjdev.autogkd.automation.SubscriptionFetcher
+import com.yzjdev.autogkd.automation.SubscriptionStore
+import com.yzjdev.autogkd.automation.TaskStore
+import com.yzjdev.autogkd.ui.theme.AutoGkdTheme
 
 class MainActivity : ComponentActivity() {
 
@@ -168,7 +168,7 @@ class MainActivity : ComponentActivity() {
         enableEdgeToEdge()
         applyRecentsHidden(this)
         setContent {
-            ComposeDemoTheme {
+            AutoGkdTheme {
                 AutomationScreen()
             }
         }
@@ -3436,7 +3436,7 @@ private fun Modifier.fillMaxHeightIfPossible(): Modifier = this
 @Preview(showBackground = true)
 @Composable
 private fun AutomationScreenPreview() {
-    ComposeDemoTheme {
+    AutoGkdTheme {
         AutomationScreen()
     }
 }

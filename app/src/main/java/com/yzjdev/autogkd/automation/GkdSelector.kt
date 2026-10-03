@@ -1,4 +1,4 @@
-package com.example.composedemo.automation
+package com.yzjdev.autogkd.automation
 
 import kotlinx.serialization.Serializable
 

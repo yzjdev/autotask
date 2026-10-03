@@ -1,7 +1,7 @@
-package com.example.composedemo
+package com.yzjdev.autogkd
 
 import android.app.Application
-import com.example.composedemo.crash.CrashReporter
+import com.yzjdev.autogkd.crash.CrashReporter
 
 /**
  * 应用入口。
@@ -13,7 +13,7 @@ import com.example.composedemo.crash.CrashReporter
  * [CrashReporter.install] 返回 false 表示本次进程是「崩溃后重启」拉起的
  * (见 CrashReporter 的递归防护),此时不再接管异常,交由系统默认处理器。
  */
-class ComposeDemoApplication : Application() {
+class AutoGkdApplication : Application() {
 
     override fun onCreate() {
         super.onCreate()

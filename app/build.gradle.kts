@@ -5,11 +5,11 @@ plugins {
 }
 
 android {
-    namespace = "com.example.composedemo"
+    namespace = "com.yzjdev.autogkd"
     compileSdk = 36
 
     defaultConfig {
-        applicationId = "com.example.composedemo"
+        applicationId = "com.yzjdev.autogkd"
         minSdk = 26
         targetSdk = 36
         versionCode = 1

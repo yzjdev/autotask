@@ -1,4 +1,4 @@
-package com.example.composedemo.ui.theme
+package com.yzjdev.autogkd.ui.theme
 
 import android.os.Build
 import androidx.compose.foundation.isSystemInDarkTheme
@@ -11,7 +11,7 @@ import androidx.compose.runtime.Composable
 import androidx.compose.ui.platform.LocalContext
 
 @Composable
-fun ComposeDemoTheme(
+fun AutoGkdTheme(
     darkTheme: Boolean = isSystemInDarkTheme(),
     dynamicColor: Boolean = false,  // 默认关闭动态取色,使用品牌配色保证观感一致
     content: @Composable () -> Unit,

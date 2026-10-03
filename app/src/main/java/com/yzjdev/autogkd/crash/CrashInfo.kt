@@ -1,4 +1,4 @@
-package com.example.composedemo.crash
+package com.yzjdev.autogkd.crash
 
 import java.text.SimpleDateFormat
 import java.util.Date
