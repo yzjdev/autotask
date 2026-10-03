@@ -1,4 +1,4 @@
-package com.yzjdev.autogkd.automation
+package com.yzjdev.autotask.automation
 
 import moe.shizuku.server.IRemoteProcess
 import moe.shizuku.server.IShizukuService

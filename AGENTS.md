@@ -1,12 +1,12 @@
 # AGENTS.md — 短剧助手
 
-Android 单模块应用,包名 `com.yzjdev.autogkd`。Kotlin + Jetpack Compose(Material 3 Expressive 风格在 `ui/theme/` 手工实现,因 material3 1.4.0 稳定版尚无 Expressive API)。核心功能:`automation/` 下的无障碍服务自动化引擎 —— GKD 订阅对齐的规则引擎,选择器/规则/订阅三层模型(见下),经 kotlinx-serialization 落盘 SharedPreferences。
+Android 单模块应用,包名 `com.yzjdev.autotask`。Kotlin + Jetpack Compose(Material 3 Expressive 风格在 `ui/theme/` 手工实现,因 material3 1.4.0 稳定版尚无 Expressive API)。核心功能:`automation/` 下的无障碍服务自动化引擎 —— GKD 订阅对齐的规则引擎,选择器/规则/订阅三层模型(见下),经 kotlinx-serialization 落盘 SharedPreferences。
 
 ## 编译(Termux 本机 — 有坑)
 
 - 项目在 sdcard(FUSE 挂载)上,`chmod` 不生效,必须用 `sh gradlew <task>` 调用 wrapper,不能用 `./gradlew`。
 - `sh gradlew assembleDebug` → 产物 `app/build/outputs/apk/debug/app-debug.apk`。
-- debug 包名带 `.debug` 后缀(`com.yzjdev.autogkd.debug`)+ versionName `-debug` 后缀 + 应用名「自动化助手 Debug」(`resValue` 覆盖 `app_name`,需 `buildFeatures.resValues = true`),与 release(`com.yzjdev.autogkd`)可并存安装互不覆盖(见 `app/build.gradle.kts` buildTypes.debug)。
+- debug 包名带 `.debug` 后缀(`com.yzjdev.autotask.debug`)+ versionName `-debug` 后缀 + 应用名「自动化助手 Debug」(`resValue` 覆盖 `app_name`,需 `buildFeatures.resValues = true`),与 release(`com.yzjdev.autotask`)可并存安装互不覆盖(见 `app/build.gradle.kts` buildTypes.debug)。
 - 安装:`PATH=/data/data/com.termux/files/usr/bin:/system/bin adb install -r app/build/outputs/apk/debug/app-debug.apk`(PATH 里的系统 adb 是坏的;Termux android-tools 锁定在 37.0.0,勿升级到 37.0.0-1)。
 - 运行时 JDK 21,但 `compileOptions` target 17;SDK 在 `ANDROID_HOME=/data/data/com.termux/files/home/android-sdk`;aapt2 经 `~/.gradle/gradle.properties` 的 `android.aapt2FromMavenOverride` 覆盖。这些都别"修"。
 - 没有 `kotlin-android` 插件:AGP 9.1.1 内置 Kotlin,只应用 `org.jetbrains.kotlin.plugin.compose` 和 `kotlin.plugin.serialization`。版本集中在 `gradle/libs.versions.toml`。

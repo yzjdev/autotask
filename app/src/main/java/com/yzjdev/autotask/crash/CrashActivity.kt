@@ -1,4 +1,4 @@
-package com.yzjdev.autogkd.crash
+package com.yzjdev.autotask.crash
 
 import android.app.Activity
 import android.content.ClipboardManager
@@ -24,8 +24,8 @@ import android.widget.LinearLayout
 import android.widget.ScrollView
 import android.widget.TextView
 import android.widget.Toast
-import com.yzjdev.autogkd.MainActivity
-import com.yzjdev.autogkd.R
+import com.yzjdev.autotask.MainActivity
+import com.yzjdev.autotask.R
 
 /*
  * 崩溃页视觉常量(暗色底 + 红色强调):

@@ -1,4 +1,4 @@
-package com.yzjdev.autogkd.automation
+package com.yzjdev.autotask.automation
 
 import kotlinx.serialization.Serializable
 

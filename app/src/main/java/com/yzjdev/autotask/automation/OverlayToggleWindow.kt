@@ -1,4 +1,4 @@
-package com.yzjdev.autogkd.automation
+package com.yzjdev.autotask.automation
 
 import android.accessibilityservice.AccessibilityService
 import android.annotation.SuppressLint

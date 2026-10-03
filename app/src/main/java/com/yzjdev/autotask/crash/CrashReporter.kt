@@ -1,4 +1,4 @@
-package com.yzjdev.autogkd.crash
+package com.yzjdev.autotask.crash
 
 import android.app.Application
 import android.content.Context

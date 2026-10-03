@@ -1,4 +1,4 @@
-package com.yzjdev.autogkd.ui.theme
+package com.yzjdev.autotask.ui.theme
 
 import androidx.compose.material3.darkColorScheme
 import androidx.compose.material3.lightColorScheme

@@ -12,7 +12,7 @@
 
 ## Global Constraints
 
-- 包名 `com.yzjdev.autogkd`，新文件放 `app/src/main/java/com/yzjdev/autogkd/automation/`。
+- 包名 `com.yzjdev.autotask`，新文件放 `app/src/main/java/com/yzjdev/autotask/automation/`。
 - 本项目在 sdcard（FUSE）上，构建命令必须用 `sh gradlew assembleDebug`（或 `sh gradlew :app:compileDebugKotlin` 做快速校验）；`chmod` 无效。
 - minSdk 26 / targetSdk 36 / compileSdk 36；JDK target 17。
 - serialization 版本取 `1.9.0`，插件 id `org.jetbrains.kotlin.plugin.serialization`，版本引用现有 `kotlin = "2.2.10"`。
@@ -71,7 +71,7 @@ git commit -m "build: add kotlinx-serialization plugin and dependency"
 ### Task 2: 数据模型 `Task.kt`
 
 **Files:**
-- Create: `app/src/main/java/com/yzjdev/autogkd/automation/Task.kt`
+- Create: `app/src/main/java/com/yzjdev/autotask/automation/Task.kt`
 
 **Interfaces:**
 - Consumes: 无。
@@ -82,7 +82,7 @@ git commit -m "build: add kotlinx-serialization plugin and dependency"
 
 - [ ] **Step 1: 按 Interfaces 块写 `Task.kt`**
 
-文件头 KDoc 标注「自动化任务 v4 模型」。结构照 spec §2：`NodeLocator`、`Step`（密封接口 + 5 个 `@Serializable` 子类）、`Task`（含内嵌 `sealed interface Trigger { OnPage(once) / Loop(intervalMs, maxRounds=0) }` 与 `sealed interface OnFailure { Retry(times=3, intervalMs=500) / Stop }`，同样显式 `@SerialName`）。`Task` 的展示字段：`name: String`。`stepsSummary()`/`label()` 为纯展示函数，实现照搬现有 `AutomationRule.stepsSummary`/`actionLabel`（见被删文件 `app/src/main/java/com/yzjdev/autogkd/automation/RuleEngine.kt:100-113` 的文案），但 `Click` 的文本从 `step.locator` 取（field==TEXT 时显示 `点「value」`，否则「点击」）。
+文件头 KDoc 标注「自动化任务 v4 模型」。结构照 spec §2：`NodeLocator`、`Step`（密封接口 + 5 个 `@Serializable` 子类）、`Task`（含内嵌 `sealed interface Trigger { OnPage(once) / Loop(intervalMs, maxRounds=0) }` 与 `sealed interface OnFailure { Retry(times=3, intervalMs=500) / Stop }`，同样显式 `@SerialName`）。`Task` 的展示字段：`name: String`。`stepsSummary()`/`label()` 为纯展示函数，实现照搬现有 `AutomationRule.stepsSummary`/`actionLabel`（见被删文件 `app/src/main/java/com/yzjdev/autotask/automation/RuleEngine.kt:100-113` 的文案），但 `Click` 的文本从 `step.locator` 取（field==TEXT 时显示 `点「value」`，否则「点击」）。
 
 - [ ] **Step 2: 编译验证**
 
@@ -92,7 +92,7 @@ Expected: BUILD SUCCESSFUL。
 - [ ] **Step 3: Commit**
 
 ```bash
-git add app/src/main/java/com/yzjdev/autogkd/automation/Task.kt
+git add app/src/main/java/com/yzjdev/autotask/automation/Task.kt
 git commit -m "feat(automation): add v4 Task/Step/NodeLocator model"
 ```
 
@@ -101,8 +101,8 @@ git commit -m "feat(automation): add v4 Task/Step/NodeLocator model"
 ### Task 3: 存储 `TaskStore.kt`
 
 **Files:**
-- Create: `app/src/main/java/com/yzjdev/autogkd/automation/TaskStore.kt`
-- Modify: `app/src/main/java/com/yzjdev/autogkd/automation/Task.kt`（如需给 `Step`/`Task` 补默认构造兼容，尽量不加）
+- Create: `app/src/main/java/com/yzjdev/autotask/automation/TaskStore.kt`
+- Modify: `app/src/main/java/com/yzjdev/autotask/automation/Task.kt`（如需给 `Step`/`Task` 补默认构造兼容，尽量不加）
 
 **Interfaces:**
 - Consumes: Task 2 的 `Task` / `Step` 模型。
@@ -123,7 +123,7 @@ Expected: BUILD SUCCESSFUL。
 - [ ] **Step 3: Commit**
 
 ```bash
-git add app/src/main/java/com/yzjdev/autogkd/automation/TaskStore.kt
+git add app/src/main/java/com/yzjdev/autotask/automation/TaskStore.kt
 git commit -m "feat(automation): add v4 TaskStore with kotlinx-serialization"
 ```
 
@@ -132,7 +132,7 @@ git commit -m "feat(automation): add v4 TaskStore with kotlinx-serialization"
 ### Task 4: 执行引擎 `TaskRunner.kt`
 
 **Files:**
-- Create: `app/src/main/java/com/yzjdev/autogkd/automation/TaskRunner.kt`
+- Create: `app/src/main/java/com/yzjdev/autotask/automation/TaskRunner.kt`
 
 **Interfaces:**
 - Consumes: Task 2 的 `Task`/`Step`/`NodeLocator.matches`；`DramaAccessibilityService` 的现有方法 `rootInActiveWindow`、`goBack()`、`swipeUp()`、`swipeDown()`、`clickAt(x,y)`、`readableText(node)`；`LogStore.log(String)`。
@@ -166,7 +166,7 @@ Expected: BUILD SUCCESSFUL。
 - [ ] **Step 3: Commit**
 
 ```bash
-git add app/src/main/java/com/yzjdev/autogkd/automation/TaskRunner.kt
+git add app/src/main/java/com/yzjdev/autotask/automation/TaskRunner.kt
 git commit -m "feat(automation): add coroutine TaskRunner engine"
 ```
 
@@ -175,7 +175,7 @@ git commit -m "feat(automation): add coroutine TaskRunner engine"
 ### Task 5: 服务接入点切换
 
 **Files:**
-- Modify: `app/src/main/java/com/yzjdev/autogkd/automation/DramaAccessibilityService.kt`
+- Modify: `app/src/main/java/com/yzjdev/autotask/automation/DramaAccessibilityService.kt`
 
 **Interfaces:**
 - Consumes: Task 4 的 `TaskRunner` 全部公开方法。
@@ -195,7 +195,7 @@ Expected: FAIL，且错误只应出现在 `MainActivity.kt`（引用 `svc.ruleEn
 - [ ] **Step 3: Commit**
 
 ```bash
-git add app/src/main/java/com/yzjdev/autogkd/automation/DramaAccessibilityService.kt
+git add app/src/main/java/com/yzjdev/autotask/automation/DramaAccessibilityService.kt
 git commit -m "refactor(automation): wire service to TaskRunner"
 ```
 
@@ -206,7 +206,7 @@ git commit -m "refactor(automation): wire service to TaskRunner"
 ### Task 6: MainActivity 切换到 Task 模型
 
 **Files:**
-- Modify: `app/src/main/java/com/yzjdev/autogkd/MainActivity.kt`
+- Modify: `app/src/main/java/com/yzjdev/autotask/MainActivity.kt`
 
 **Interfaces:**
 - Consumes: Task 2 `Task`/`Step`/`stepsSummary()`/`label()`；Task 3 `TaskStore`（含 `AppInfo`）；Task 5 `taskRunner.setTasks(...)`。
@@ -244,7 +244,7 @@ Expected: BUILD SUCCESSFUL（此时 RuleEngine.kt/RuleStore.kt 已无人引用�
 - [ ] **Step 6: Commit**
 
 ```bash
-git add app/src/main/java/com/yzjdev/autogkd/MainActivity.kt
+git add app/src/main/java/com/yzjdev/autotask/MainActivity.kt
 git commit -m "refactor(ui): adapt rule list/editor to v4 Task model"
 ```
 
@@ -253,13 +253,13 @@ git commit -m "refactor(ui): adapt rule list/editor to v4 Task model"
 ### Task 7: 删除旧实现 + 全量验收
 
 **Files:**
-- Delete: `app/src/main/java/com/yzjdev/autogkd/automation/RuleEngine.kt`
-- Delete: `app/src/main/java/com/yzjdev/autogkd/automation/RuleStore.kt`
+- Delete: `app/src/main/java/com/yzjdev/autotask/automation/RuleEngine.kt`
+- Delete: `app/src/main/java/com/yzjdev/autotask/automation/RuleStore.kt`
 
 - [ ] **Step 1: 删除两个旧文件**
 
 ```bash
-git rm app/src/main/java/com/yzjdev/autogkd/automation/RuleEngine.kt app/src/main/java/com/yzjdev/autogkd/automation/RuleStore.kt
+git rm app/src/main/java/com/yzjdev/autotask/automation/RuleEngine.kt app/src/main/java/com/yzjdev/autotask/automation/RuleStore.kt
 ```
 
 - [ ] **Step 2: 无残留引用检查**

@@ -5,11 +5,11 @@ plugins {
 }
 
 android {
-    namespace = "com.yzjdev.autogkd"
+    namespace = "com.yzjdev.autotask"
     compileSdk = 36
 
     defaultConfig {
-        applicationId = "com.yzjdev.autogkd"
+        applicationId = "com.yzjdev.autotask"
         minSdk = 26
         targetSdk = 36
         versionCode = 1

@@ -1,7 +1,7 @@
-package com.yzjdev.autogkd
+package com.yzjdev.autotask
 
 import android.app.Application
-import com.yzjdev.autogkd.crash.CrashReporter
+import com.yzjdev.autotask.crash.CrashReporter
 
 /**
  * 应用入口。
@@ -13,7 +13,7 @@ import com.yzjdev.autogkd.crash.CrashReporter
  * [CrashReporter.install] 返回 false 表示本次进程是「崩溃后重启」拉起的
  * (见 CrashReporter 的递归防护),此时不再接管异常,交由系统默认处理器。
  */
-class AutoGkdApplication : Application() {
+class AutoTaskApplication : Application() {
 
     override fun onCreate() {
         super.onCreate()

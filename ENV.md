@@ -1,8 +1,8 @@
-# AutoGkd 编译环境与复用说明
+# AutoTask 编译环境与复用说明
 
 ## 项目配置
 
-- Android Compose 单模块工程,包名 `com.yzjdev.autogkd`
+- Android Compose 单模块工程,包名 `com.yzjdev.autotask`
 - minSdk 26 / targetSdk 36 / compileSdk 36
 - 主题:Material 3 Expressive(基于 material3 1.4.0 稳定版手工实现:
   形状 8/10/12/16/28dp 圆角 + 字重加强的字阶 + 动态取色)
@@ -40,14 +40,14 @@ sh gradlew assembleDebug
 
 ## 复用步骤(主要改包名)
 
-1. 解压 zip:`unzip AutoGkd.zip`
+1. 解压 zip:`unzip AutoTask.zip`
 2. 改包名(例如改成 `com.other.newapp`):
    - `app/build.gradle.kts`:`namespace` 与 `applicationId` 两处
-   - 移动目录 `app/src/main/java/com/yzjdev/autogkd/`
+   - 移动目录 `app/src/main/java/com/yzjdev/autotask/`
      到 `app/src/main/java/com/other/newapp/`
-   - 各 Kotlin 文件首行 `package com.yzjdev.autogkd`(及子包)
+   - 各 Kotlin 文件首行 `package com.yzjdev.autotask`(及子包)
      → `package com.other.newapp`
-   - `MainActivity.kt` 中 `import com.yzjdev.autogkd.ui.theme.AutoGkdTheme`
+   - `MainActivity.kt` 中 `import com.yzjdev.autotask.ui.theme.AutoTaskTheme`
      改为新包名
 3. 如需换主题颜色/字体,修改 `ui/theme/` 下的 `Theme.kt`、`Type.kt`、`Shape.kt`
 4. `sh gradlew assembleDebug` 构建验证

@@ -20,5 +20,5 @@ dependencyResolutionManagement {
     }
 }
 
-rootProject.name = "AutoGkd"
+rootProject.name = "AutoTask"
 include(":app")

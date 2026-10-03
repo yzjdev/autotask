@@ -1,4 +1,4 @@
-package com.yzjdev.autogkd.crash
+package com.yzjdev.autotask.crash
 
 import java.text.SimpleDateFormat
 import java.util.Date
