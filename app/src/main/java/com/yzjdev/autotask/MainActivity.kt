@@ -1135,6 +1135,7 @@ private fun AppsScreen(
             AppsLoadingView()
         } else {
         // 滚动状态由上层传入:进入任务页/规则页返回后恢复上一次滚动位置
+        Box(modifier = Modifier.fillMaxSize()) {
         LazyColumn(
             state = listState,
             modifier = Modifier.fillMaxSize(),
@@ -1164,6 +1165,13 @@ private fun AppsScreen(
                     },
                 )
             }
+        }
+        // 快速滑动条:覆盖在列表右侧,拖动跳转
+        FastScrollbar(
+            listState = listState,
+            itemCount = visibleApps.size,
+            modifier = Modifier.align(Alignment.CenterEnd),
+        )
         }
         }
     }
@@ -1697,23 +1705,19 @@ private fun AllRulesPage(
 
         // 列表滚动状态:快速滑动条拖动定位用
         val listState = rememberLazyListState()
-        // 同名合并:按显示标题(名称,空回退动作摘要)归组;全局规则永远第一;
+        // 三大分组:全局 / 订阅 / 自定义,全局第一、自定义最后;
         // 未安装应用的规则不展示(规则仍保留在任务表中,装回后自动恢复)
         val installedPkgs = (installedApps ?: emptyList()).map { it.packageName }.toSet()
-        val globals = tasks.filter { it.packageName.isEmpty() }
-        val apps = tasks.filter { it.packageName.isNotEmpty() && it.packageName in installedPkgs }
-        val visible = globals + apps
-        val merged = visible
-            .groupBy { it.name.ifEmpty { it.actionsSummary } }
-            .map { (title, list) ->
-                // 组内排序:全局规则在前,其余保持任务表原序
-                Triple(title, list.filter { it.packageName.isEmpty() } + list.filter { it.packageName.isNotEmpty() }, list.any { it.enabled })
-            }
-        // 排序:含全局规则的合并卡最前,其次按标题
-        val orderedGroups = merged.sortedWith(
-            compareByDescending<Triple<String, List<GkdTask>, Boolean>> { it.second.first().packageName.isEmpty() }
-                .thenBy { it.first }
-        )
+        val visibleTasks = tasks.filter { it.packageName.isEmpty() || it.packageName in installedPkgs }
+        // 分组:全局(packageName 空)/ 订阅(id 前缀 sub_)/ 自定义(其余),组内同名再合并
+        val sections = listOf(
+            Triple("全局规则", visibleTasks.filter { it.packageName.isEmpty() }, "global"),
+            Triple("订阅规则", visibleTasks.filter { it.packageName.isNotEmpty() && it.isFromSubscription }, "sub"),
+            Triple("自定义规则", visibleTasks.filter { it.packageName.isNotEmpty() && !it.isFromSubscription }, "custom"),
+        ).filter { it.second.isNotEmpty() }
+        // 展开状态:默认全部收起;key = 分组 key
+        var expandedSections by rememberSaveable { mutableStateOf(setOf<String>()) }
+
         Box(modifier = Modifier.fillMaxSize()) {
             LazyColumn(
                 state = listState,
@@ -1721,20 +1725,46 @@ private fun AllRulesPage(
                 contentPadding = PaddingValues(start = 16.dp, end = 16.dp, bottom = 32.dp),
                 verticalArrangement = Arrangement.spacedBy(8.dp),
             ) {
-            items(orderedGroups.size, key = { orderedGroups[it].first }, contentType = { "group" }) { i ->
-                val (title, groupTasks, anyEnabled) = orderedGroups[i]
-                MergedRuleCard(
-                    title = title,
-                    groupTasks = groupTasks,
-                    anyEnabled = anyEnabled,
-                    labelByPkg = labelByPkg,
-                    onToggleTask = onToggleTask,
-                    onEditTask = onEditTask,
-                    onLongPress = { pendingDeleteId = it },
-                )
+            sections.forEach { (sectionTitle, sectionTasks, sectionKey) ->
+                val expanded = sectionKey in expandedSections
+                item(key = "sec_$sectionKey", contentType = "section") {
+                    SectionHeader(
+                        title = sectionTitle,
+                        count = sectionTasks.size,
+                        expanded = expanded,
+                        onClick = {
+                            expandedSections = if (expanded) expandedSections - sectionKey
+                            else expandedSections + sectionKey
+                        },
+                    )
+                }
+                if (expanded) {
+                    // 组内同名合并(与原逻辑一致:全局规则优先排前)
+                    val merged = sectionTasks
+                        .groupBy { it.name.ifEmpty { it.actionsSummary } }
+                        .map { (title, list) ->
+                            Triple(title, list.filter { it.packageName.isEmpty() } + list.filter { it.packageName.isNotEmpty() }, list.any { it.enabled })
+                        }
+                        .sortedWith(
+                            compareByDescending<Triple<String, List<GkdTask>, Boolean>> { it.second.first().packageName.isEmpty() }
+                                .thenBy { it.first }
+                        )
+                    items(merged.size, key = { "$sectionKey-${merged[it].first}" }, contentType = { "group" }) { i ->
+                        val (title, groupTasks, anyEnabled) = merged[i]
+                        MergedRuleCard(
+                            title = title,
+                            groupTasks = groupTasks,
+                            anyEnabled = anyEnabled,
+                            labelByPkg = labelByPkg,
+                            onToggleTask = onToggleTask,
+                            onEditTask = onEditTask,
+                            onLongPress = { pendingDeleteId = it },
+                        )
+                    }
+                }
             }
 
-            if (visible.isEmpty()) {
+            if (visibleTasks.isEmpty()) {
                 item {
                     Text(
                         text = "暂无规则。在「应用」tab 选择应用后新建。",
@@ -1747,8 +1777,47 @@ private fun AllRulesPage(
             // 快速滑动条:覆盖在列表右侧,拖动跳转
             FastScrollbar(
                 listState = listState,
-                itemCount = orderedGroups.size + if (visible.isEmpty()) 1 else 0,
+                itemCount = listState.layoutInfo.totalItemsCount,
                 modifier = Modifier.align(Alignment.CenterEnd),
+            )
+        }
+    }
+}
+
+/** 规则页分组标题行:名称 + 条数 + 展开箭头,点按切换折叠 */
+@Composable
+private fun SectionHeader(
+    title: String,
+    count: Int,
+    expanded: Boolean,
+    onClick: () -> Unit,
+) {
+    Surface(
+        onClick = onClick,
+        modifier = Modifier.fillMaxWidth(),
+        shape = MaterialTheme.shapes.medium,
+        color = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.35f),
+    ) {
+        Row(
+            modifier = Modifier.padding(horizontal = 12.dp, vertical = 10.dp),
+            verticalAlignment = Alignment.CenterVertically,
+        ) {
+            Text(
+                text = title,
+                style = MaterialTheme.typography.titleSmall,
+                fontWeight = FontWeight.SemiBold,
+                modifier = Modifier.weight(1f),
+            )
+            Text(
+                text = "$count",
+                style = MaterialTheme.typography.labelSmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+            )
+            Spacer(modifier = Modifier.width(6.dp))
+            Icon(
+                imageVector = if (expanded) Icons.Filled.KeyboardArrowUp else Icons.Filled.KeyboardArrowDown,
+                contentDescription = if (expanded) "收起" else "展开",
+                tint = MaterialTheme.colorScheme.onSurfaceVariant,
             )
         }
     }
@@ -2110,6 +2179,8 @@ private fun TaskListPage(
             }
         }
 
+        // 分组展开状态:默认全部收起
+        var expandedSections by remember { mutableStateOf(setOf<String>()) }
         LazyColumn(
             modifier = Modifier.fillMaxSize(),
             contentPadding = PaddingValues(start = 16.dp, end = 16.dp, bottom = 32.dp),
@@ -2125,12 +2196,32 @@ private fun TaskListPage(
                 }
             }
 
-            items(appTasks.size, key = { appTasks[it].id }, contentType = { "task" }) { i ->
-                val task = appTasks[i]
-                val accent = if (task.enabled) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.outlineVariant
-                // 全局规则用次要色容器底与普通应用规则区分
-                val isGlobal = task.packageName.isEmpty()
-                Card(
+            // 三大分组:全局 / 订阅 / 自定义,默认收起,点标题展开
+            val sections = listOf(
+                Triple("全局规则", appTasks.filter { it.packageName.isEmpty() }, "global"),
+                Triple("订阅规则", appTasks.filter { it.packageName == pkg && it.isFromSubscription }, "sub"),
+                Triple("自定义规则", appTasks.filter { it.packageName == pkg && !it.isFromSubscription }, "custom"),
+            ).filter { it.second.isNotEmpty() }
+            sections.forEach { (sectionTitle, sectionTasks, sectionKey) ->
+                val expanded = sectionKey in expandedSections
+                item(key = "sec_$sectionKey", contentType = "section") {
+                    SectionHeader(
+                        title = sectionTitle,
+                        count = sectionTasks.size,
+                        expanded = expanded,
+                        onClick = {
+                            expandedSections = if (expanded) expandedSections - sectionKey
+                            else expandedSections + sectionKey
+                        },
+                    )
+                }
+                if (expanded) {
+                    items(sectionTasks.size, key = { sectionTasks[it].id }, contentType = { "task" }) { i ->
+                        val task = sectionTasks[i]
+                        val accent = if (task.enabled) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.outlineVariant
+                        // 全局规则用次要色容器底与普通应用规则区分
+                        val isGlobal = task.packageName.isEmpty()
+                        Card(
                     modifier = Modifier
                         .fillMaxWidth()
                         // 点按卡片进入编辑;长按删除
@@ -2202,6 +2293,8 @@ private fun TaskListPage(
                             onCheckedChange = { onToggleTask(task.id, it) },
                         )
                     }
+                }
+            }
                 }
             }
 
