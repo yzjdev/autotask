@@ -17,6 +17,7 @@ import android.view.WindowManager
 import android.view.accessibility.AccessibilityNodeInfo
 import android.widget.Button
 import android.widget.FrameLayout
+import android.widget.HorizontalScrollView
 import android.widget.LinearLayout
 import android.widget.ScrollView
 import android.widget.TextView
@@ -46,20 +47,25 @@ class OverlayDebugWindow(private val service: AccessibilityService) {
 
     private var cardView: LinearLayout? = null
     private var titleView: TextView? = null
+    private var activityView: TextView? = null
     private var countView: TextView? = null
     private var infoView: LinearLayout? = null
     private var dirRow: LinearLayout? = null
     private var dirButtons: MutableList<TextView>? = null
     private var scrollRegion: ScrollView? = null
     private var boundsView: BoundsOverlayView? = null
+    private var treeDrawer: LinearLayout? = null
+    private var treeListView: LinearLayout? = null
+    private var treeScroll: ScrollView? = null
+    private var treeShown = false
     private val maxScrollHeight: Int get() =
-        (screenH * 0.45f).toInt().coerceAtLeast(dp(80))  // 表格区高度封顶(约半屏)
+        (screenH * 0.35f).toInt().coerceAtLeast(dp(80))  // 表格区高度封顶(约 1/3 屏)
 
-    /** 信息卡片:标题栏(应用名+关闭)+ 详情 + 方向按钮,可交互(中层层级)。固定宽度,不随内容伸缩 */
+    /** 信息卡片:标题栏 + 详情 + 方向按钮,可交互(中层层级)。固定宽高,不随内容伸缩 */
     private val cardLp by lazy {
         WindowManager.LayoutParams(
-            dp(260),
-            WindowManager.LayoutParams.WRAP_CONTENT,
+            dp(320),
+            dp(380),
             WindowManager.LayoutParams.TYPE_ACCESSIBILITY_OVERLAY,
             WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE,
             PixelFormat.TRANSLUCENT,
@@ -80,6 +86,17 @@ class OverlayDebugWindow(private val service: AccessibilityService) {
                 or WindowManager.LayoutParams.FLAG_LAYOUT_NO_LIMITS,  // 允许超出常规窗口边界
             PixelFormat.TRANSLUCENT,
         ).apply { gravity = Gravity.TOP or Gravity.START }
+    }
+
+    /** 节点树抽屉:底部弹出的独立窗口,树形列表 + 点击定位(与信息卡片同级层级)。全屏宽 */
+    private val treeLp by lazy {
+        WindowManager.LayoutParams(
+            WindowManager.LayoutParams.MATCH_PARENT,
+            (screenH * 0.6f).toInt(),
+            WindowManager.LayoutParams.TYPE_ACCESSIBILITY_OVERLAY,
+            WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE,
+            PixelFormat.TRANSLUCENT,
+        ).apply { gravity = Gravity.BOTTOM or Gravity.CENTER_HORIZONTAL }
     }
 
     /** 节点信息抓取开关状态 */
@@ -108,16 +125,19 @@ class OverlayDebugWindow(private val service: AccessibilityService) {
      * 即同步更新悬浮窗标题,无需用户重新抓取节点。
      */
     private val activityListener: (android.content.ComponentName) -> Unit = { cn ->
-        mainHandler.post {
-            val title = formatTitle(cn)
-            lastAppName = title
-            titleView?.text = title
-        }
+        mainHandler.post { applyHeader(cn) }
     }
 
     /** 标题格式:应用名(包名/Activity 短类名) */
     private fun formatTitle(cn: android.content.ComponentName): String =
         "${appLabel(cn.packageName ?: "")}(${cn.packageName}/${cn.shortClassName})"
+
+    /** 头部两行:第一行应用名,第二行单独显示 Activity 全名 */
+    private fun applyHeader(cn: android.content.ComponentName) {
+        lastAppName = formatTitle(cn)
+        titleView?.text = appLabel(cn.packageName ?: "")
+        activityView?.text = "${cn.packageName}/${cn.shortClassName}"
+    }
 
     // ---- 控制面板(开关悬浮球,独立 UI)----
 
@@ -177,6 +197,7 @@ class OverlayDebugWindow(private val service: AccessibilityService) {
     private fun hideCaptureLayers() {
         setLayerVisible(cardLp, cardView, false)
         setLayerVisible(boundsLp, boundsView, false)
+        hideTreeDrawer()
         snapshots = emptyList()
         selectedIndex = -1
     }
@@ -199,7 +220,186 @@ class OverlayDebugWindow(private val service: AccessibilityService) {
     /** 仅隐藏节点信息卡片;边框绘制保留,可继续点击边框查看节点 */
     private fun closeInfoCard() {
         setLayerVisible(cardLp, cardView, false)
+        hideTreeDrawer()
         boundsView?.setSelected(-1)
+    }
+
+    // ---- 节点树抽屉 ----
+
+    /** 抽屉显隐切换:展开时隐藏节点信息卡片(互不遮挡),收起时恢复 */
+    private fun toggleTreeDrawer() {
+        if (treeShown) {
+            hideTreeDrawer()
+            // 收起抽屉后恢复信息卡片(仅当仍有选中节点)
+            if (selectedIndex >= 0) setLayerVisible(cardLp, cardView, true)
+        } else {
+            ensureTreeDrawer()
+            renderTreeView()
+            setLayerVisible(treeLp, treeDrawer, true)
+            setLayerVisible(cardLp, cardView, false)  // 抽屉展开时隐藏节点信息卡片
+            treeShown = true
+            toggleWindow.bringToFront()
+        }
+    }
+
+    private fun hideTreeDrawer() {
+        setLayerVisible(treeLp, treeDrawer, false)
+        treeShown = false
+    }
+
+    /** 创建抽屉窗口:标题栏(节点数 + 收起钮) + 树形列表 ScrollView */
+    private fun ensureTreeDrawer() {
+        if (treeDrawer != null) return
+        val title = TextView(service).apply {
+            text = "节点树"
+            setTextColor(Color.WHITE)
+            setTextSize(TypedValue.COMPLEX_UNIT_SP, 12f)
+            typeface = android.graphics.Typeface.DEFAULT_BOLD
+            setPadding(dp(12), dp(10), dp(12), dp(10))
+        }
+        val collapse = TextView(service).apply {
+            text = "▾ 收起"
+            setTextSize(TypedValue.COMPLEX_UNIT_SP, 11f)
+            setTextColor(0xCCF59E0B.toInt())
+            setPadding(dp(10), dp(6), dp(10), dp(6))
+            setOnClickListener { hideTreeDrawer() }
+        }
+        val header = LinearLayout(service).apply {
+            orientation = LinearLayout.HORIZONTAL
+            gravity = Gravity.CENTER_VERTICAL
+            addView(title, LinearLayout.LayoutParams(0,
+                LinearLayout.LayoutParams.WRAP_CONTENT, 1f))
+            addView(collapse)
+        }
+        val list = LinearLayout(service).apply {
+            orientation = LinearLayout.VERTICAL
+            setPadding(dp(8), dp(4), dp(8), dp(12))
+        }
+        treeListView = list
+        // 横向滚动:深层级行向右延展,左右滑动查看
+        val hScroll = HorizontalScrollView(service).apply {
+            isHorizontalScrollBarEnabled = true
+            addView(list, LinearLayout.LayoutParams(
+                LinearLayout.LayoutParams.WRAP_CONTENT,
+                LinearLayout.LayoutParams.WRAP_CONTENT))
+        }
+        treeScroll = ScrollView(service).apply {
+            isVerticalScrollBarEnabled = true
+            addView(hScroll)
+        }
+        val drawer = LinearLayout(service).apply {
+            orientation = LinearLayout.VERTICAL
+            // 背景色不变;顶部 1dp 琥珀线用 FrameLayout 叠加实现(避免描边在贴边三侧画线)
+            val bg = android.graphics.drawable.GradientDrawable().apply {
+                shape = android.graphics.drawable.GradientDrawable.RECTANGLE
+                cornerRadii = floatArrayOf(
+                    dp(14).toFloat(), dp(14).toFloat(),  // 左上
+                    dp(14).toFloat(), dp(14).toFloat(),  // 右上
+                    0f, 0f,                               // 右下
+                    0f, 0f,                               // 左下
+                )
+                setColor(0xF51A1206.toInt())
+            }
+            background = bg
+            addView(header)
+            addView(treeScroll, LinearLayout.LayoutParams(
+                LinearLayout.LayoutParams.MATCH_PARENT, 0, 1f))
+            // 顶部琥珀线:2dp 高的圆角矩形,叠在 header 下沿
+            val topLine = View(service).apply {
+                background = android.graphics.drawable.ColorDrawable(0x40F59E0B.toInt())
+                layoutParams = LinearLayout.LayoutParams(
+                    LinearLayout.LayoutParams.MATCH_PARENT, dp(1))
+            }
+            addView(topLine, 1)  // 插在 header 之后、列表之前
+        }
+        treeDrawer = drawer
+        wm.addView(drawer, treeLp)
+        toggleWindow.bringToFront()
+    }
+
+    /** 渲染节点树:DFS 缩进列表,每行 = 缩进 + 类名 + 摘要,点击定位该节点。
+     * 行内容完整不省略(深层级向右延展),整列套双向滚动(纵向 + 横向)。 */
+    private fun renderTreeView() {
+        val container = treeListView ?: return
+        container.removeAllViews()
+        if (snapshots.isEmpty()) return
+        // 找根节点们(parent = -1),逐个 DFS 输出
+        fun dfs(idx: Int, depth: Int) {
+            if (depth > 20) return  // 防环
+            val s = snapshots.getOrNull(idx) ?: return
+            container.addView(treeRow(idx, s, depth))
+            s.children.forEach { dfs(it, depth + 1) }
+        }
+        snapshots.indices.filter { snapshots[it].parent == -1 }.forEach { dfs(it, 0) }
+    }
+
+    /** 树行双击检测(抽屉级共享一个 GestureDetector,记录当前触控行,避免每行各建一个) */
+    private var treeTapIndex = -1
+    private val treeTapDetector by lazy {
+        android.view.GestureDetector(service,
+            object : android.view.GestureDetector.SimpleOnGestureListener() {
+                override fun onDown(e: MotionEvent): Boolean = true
+                override fun onSingleTapConfirmed(e: MotionEvent): Boolean {
+                    if (treeTapIndex >= 0) select(treeTapIndex)
+                    return true
+                }
+                override fun onDoubleTap(e: MotionEvent): Boolean {
+                    if (treeTapIndex >= 0) {
+                        select(treeTapIndex)
+                        toggleTreeDrawer()
+                    }
+                    return true
+                }
+            })
+    }
+
+    /** 节点树单行:缩进(空格) + 类名(#id/"文本") + 可点击标记,选中行高亮。
+     * 行不省略、不限定宽度,超宽由外层横向 ScrollView 滑动查看。 */
+    private fun treeRow(idx: Int, s: NodeSnapshot, depth: Int): View {
+        val selected = idx == selectedIndex
+        val row = LinearLayout(service).apply {
+            orientation = LinearLayout.HORIZONTAL
+            gravity = Gravity.CENTER_VERTICAL
+            minimumHeight = dp(26)
+            setPadding(dp(4), dp(2), dp(4), dp(2))
+            isClickable = true
+            setOnTouchListener { _, ev ->
+                treeTapIndex = idx
+                treeTapDetector.onTouchEvent(ev)
+            }
+            background = if (selected) android.graphics.drawable.GradientDrawable().apply {
+                cornerRadius = dp(6).toFloat()
+                setColor(0x33F59E0B.toInt())
+            } else null
+        }
+        row.addView(TextView(service).apply {
+            text = if (s.children.isNotEmpty()) "▾" else "·"
+            setTextColor(if (s.children.isNotEmpty()) 0x80F59E0B.toInt() else 0x40FFFFFF.toInt())
+            setTextSize(TypedValue.COMPLEX_UNIT_SP, 9f)
+            layoutParams = LinearLayout.LayoutParams(dp(10),
+                LinearLayout.LayoutParams.WRAP_CONTENT)
+        })
+        row.addView(TextView(service).apply {
+            // 缩进用等宽空格,行宽随深度自然延展,不参与省略
+            val indent = "  ".repeat(depth)
+            text = buildString {
+                append(indent)
+                append(s.info)
+                if (s.clickable) append(" ⬑")
+            }
+            setTextColor(if (selected) 0xFFF59E0B.toInt()
+                else if (s.clickable) 0xCCFFFFFF.toInt() else 0x99FFFFFF.toInt())
+            setTextSize(TypedValue.COMPLEX_UNIT_SP, 10f)
+            typeface = android.graphics.Typeface.MONOSPACE
+            maxLines = 1
+            // 不 ellipsize:完整内容,由横向滚动承接
+            layoutParams = LinearLayout.LayoutParams(
+                LinearLayout.LayoutParams.WRAP_CONTENT,
+                LinearLayout.LayoutParams.WRAP_CONTENT).apply {
+                leftMargin = dp(4)
+            }
+        })
+        return row
     }
 
     /** 抓取当前窗口节点树:绘制边界框 + 选中根节点 */
@@ -253,11 +453,7 @@ class OverlayDebugWindow(private val service: AccessibilityService) {
                 mainHandler.post {
                     // 只替换本次抓取的标题;期间用户重新抓取过(generation 变化)则丢弃
                     if (generation == captureGeneration && captureEnabled) {
-                        val newTitle = formatTitle(result)
-                        if (newTitle != lastAppName) {
-                            titleView?.text = newTitle
-                            lastAppName = newTitle
-                        }
+                        applyHeader(result)
                     }
                 }
             }.start()
@@ -382,7 +578,7 @@ class OverlayDebugWindow(private val service: AccessibilityService) {
 
         // 头部:应用名(左,加粗) + 节点计数徽章(胶囊) + 关闭钮(右)
         val title = TextView(service).apply {
-            text = appName
+            text = appName.substringBefore('(').ifEmpty { appName }
             setTextColor(Color.WHITE)
             setTextSize(TypedValue.COMPLEX_UNIT_SP, 13f)
             typeface = android.graphics.Typeface.DEFAULT_BOLD
@@ -390,6 +586,23 @@ class OverlayDebugWindow(private val service: AccessibilityService) {
             ellipsize = android.text.TextUtils.TruncateAt.END
         }
         titleView = title
+
+        // 第二行:Activity 全名(包名/短类名),完整显示(不截断),长按复制
+        val activity = TextView(service).apply {
+            text = appName.substringAfter('(', "").removeSuffix(")")
+                .ifEmpty { "未知 Activity" }
+            setTextColor(0x80FFFFFF.toInt())
+            setTextSize(TypedValue.COMPLEX_UNIT_SP, 9f)
+            typeface = android.graphics.Typeface.MONOSPACE
+            // 长按复制完整 Activity 名
+            setOnLongClickListener {
+                copyToClipboard(text.toString())
+                it.animate().alpha(0.4f).setDuration(80)
+                    .withEndAction { it.animate().alpha(1f).setDuration(120) }
+                true
+            }
+        }
+        activityView = activity
 
         // 节点计数徽章:浅琥珀底胶囊,显示「n/m」,选中时由 renderInfoTable 更新
         val count = TextView(service).apply {
@@ -424,14 +637,22 @@ class OverlayDebugWindow(private val service: AccessibilityService) {
             setOnClickListener { closeInfoCard() }  // 只关闭节点信息卡片,绘制保留
         }
 
-        val titleBar = LinearLayout(service).apply {
+        // 第一行:应用名(左) + 节点计数徽章 + 关闭钮(右)
+        val headerRow = LinearLayout(service).apply {
             orientation = LinearLayout.HORIZONTAL
             gravity = Gravity.CENTER_VERTICAL
-            setPadding(dp(12), dp(12), dp(10), dp(12))
+            setPadding(dp(12), dp(10), dp(10), dp(6))
             addView(title, LinearLayout.LayoutParams(0,
                 LinearLayout.LayoutParams.WRAP_CONTENT, 1f))
             addView(count)
             addView(close)
+        }
+        // 第二行:Activity 全名单独一行,完整显示(超宽卡片内换行),长按复制
+        val activityRow = LinearLayout(service).apply {
+            orientation = LinearLayout.HORIZONTAL
+            setPadding(dp(12), 0, dp(10), dp(8))
+            addView(activity, LinearLayout.LayoutParams(0,
+                LinearLayout.LayoutParams.WRAP_CONTENT, 1f))
         }
 
         // 分隔线:同一 View 实例不能放两处,各建一条
@@ -460,7 +681,7 @@ class OverlayDebugWindow(private val service: AccessibilityService) {
         // 方向按钮:单行排布(上 / 下 / 左 / 右),等分四格,不可移动时置禁用态
         val dirs = LinearLayout(service).apply {
             orientation = LinearLayout.HORIZONTAL
-            setPadding(dp(12), dp(10), dp(12), dp(12))
+            setPadding(dp(12), dp(6), dp(12), dp(8))
         }
         dirRow = dirs
         val buttons = mutableListOf<TextView>()
@@ -468,13 +689,23 @@ class OverlayDebugWindow(private val service: AccessibilityService) {
             "←" to { moveLeft() }, "→" to { moveRight() }).forEach { (label, action) ->
             val cell = FrameLayout(service).apply {
                 addView(dirButton(label) { action() }, FrameLayout.LayoutParams(
-                    dp(34), dp(34), Gravity.CENTER))
+                    dp(30), dp(30), Gravity.CENTER))
             }
             buttons.add(cell.getChildAt(0) as TextView)
             dirs.addView(cell, LinearLayout.LayoutParams(0,
                 LinearLayout.LayoutParams.MATCH_PARENT, 1f))
         }
         dirButtons = buttons
+
+        // 底部抽屉把手:点开/收起节点树抽屉
+        val treeHandle = TextView(service).apply {
+            text = "▼ 节点树"
+            setTextSize(TypedValue.COMPLEX_UNIT_SP, 11f)
+            gravity = Gravity.CENTER
+            setTextColor(0xCCF59E0B.toInt())
+            setPadding(0, dp(8), 0, dp(8))
+            setOnClickListener { toggleTreeDrawer() }
+        }
 
         // 外层 wrapper 承担圆角背景:子 View 的直角不会溢出圆角
         val card = LinearLayout(service).apply {
@@ -485,15 +716,17 @@ class OverlayDebugWindow(private val service: AccessibilityService) {
                 setColor(0xF51A1206.toInt())  // 琥珀夜底
                 setStroke(dp(1), 0x40F59E0B.toInt())  // 琥珀描边
             }
-            addView(titleBar)
+            addView(headerRow)
+            addView(activityRow)
             addView(dividerTop, LinearLayout.LayoutParams(
                 LinearLayout.LayoutParams.MATCH_PARENT, dp(1)))
+            // 表格区占满剩余高度(卡片固定高,内容超出时内部滚动)
             addView(scroll, LinearLayout.LayoutParams(
-                LinearLayout.LayoutParams.MATCH_PARENT,
-                LinearLayout.LayoutParams.WRAP_CONTENT))
+                LinearLayout.LayoutParams.MATCH_PARENT, 0, 1f))
             addView(dividerBottom, LinearLayout.LayoutParams(
                 LinearLayout.LayoutParams.MATCH_PARENT, dp(1)))
             addView(dirs)
+            addView(treeHandle)
         }
         cardView = card
         wm.addView(card, cardLp)
@@ -510,11 +743,17 @@ class OverlayDebugWindow(private val service: AccessibilityService) {
         cardView?.let { try { wm.removeView(it) } catch (_: Exception) {} }
         cardView = null
         titleView = null
+        activityView = null
         countView = null
         infoView = null
         dirRow = null
         dirButtons = null
         scrollRegion = null
+        treeDrawer?.let { try { wm.removeView(it) } catch (_: Exception) {} }
+        treeDrawer = null
+        treeListView = null
+        treeScroll = null
+        treeShown = false
         snapshots = emptyList()
         selectedIndex = -1
     }
@@ -523,13 +762,39 @@ class OverlayDebugWindow(private val service: AccessibilityService) {
 
     private fun select(index: Int) {
         if (index < 0 || index >= snapshots.size) return
+        val prevSelected = selectedIndex
         selectedIndex = index
         val s = snapshots[index]
         boundsView?.setSelected(index)
         ensureInfoCard(lastAppName)
-        setLayerVisible(cardLp, cardView, true)   // 选中节点即显示卡片
+        setLayerVisible(cardLp, cardView, true && !treeShown)   // 选中节点即显示卡片;树抽屉展开时保持隐藏
         updateDirButtons(index, s)
         renderInfoTable(index, s)
+        // 树抽屉打开时只刷新新旧两行高亮,不整棵重建(全量重建数百行会卡顿)
+        if (treeShown) refreshTreeHighlight(prevSelected, index)
+    }
+
+    /** 只更新两行的高亮背景与文字颜色:遍历可见子 View 匹配,避免整棵树重建 */
+    private fun refreshTreeHighlight(prev: Int, cur: Int) {
+        val list = treeListView ?: return
+        for (i in 0 until list.childCount) {
+            val row = list.getChildAt(i) as? LinearLayout ?: continue
+            // 树行按 DFS 顺序添加,与 snapshots 下标一致:列表第 i 行 = 节点 i
+            when (i) {
+                prev, cur -> {
+                    val isSel = i == cur
+                    row.background = if (isSel) android.graphics.drawable.GradientDrawable().apply {
+                        cornerRadius = dp(6).toFloat()
+                        setColor(0x33F59E0B.toInt())
+                    } else null
+                    // 第二个子 View 是文本行,更新颜色
+                    (row.getChildAt(1) as? TextView)?.setTextColor(
+                        if (isSel) 0xFFF59E0B.toInt()
+                        else if (snapshots[i].clickable) 0xCCFFFFFF.toInt() else 0x99FFFFFF.toInt()
+                    )
+                }
+            }
+        }
     }
 
     /** 四个方向按钮:对应方向可移动才可用,否则禁用(变暗 + 不可点) */
@@ -603,26 +868,51 @@ class OverlayDebugWindow(private val service: AccessibilityService) {
             }
         })
         block.addView(top)
-        // 祖先面包屑:root > … > 父节点(最多 12 级防环)
-        val crumbs = ArrayList<String>()
+        // 祖先面包屑:横向可滑动 + 每级可点击跳转(root > … > 父节点,最多 12 级防环)
+        val crumbs = ArrayList<Pair<String, Int>>()  // 类名 → 祖先节点下标
         var p = s.parent
         var guard = 0
         while (p >= 0 && guard < 12) {
             guard++
             val ps = snapshots.getOrNull(p) ?: break
-            crumbs.add(0, (ps.table["类名"] ?: "?").substringAfterLast('.'))
+            crumbs.add(0, (ps.table["类名"] ?: "?").substringAfterLast('.') to p)
             p = ps.parent
         }
         if (crumbs.isNotEmpty()) {
-            block.addView(TextView(service).apply {
-                text = crumbs.joinToString(" > ")
-                setTextColor(0x80FFFFFF.toInt())
-                setTextSize(TypedValue.COMPLEX_UNIT_SP, 9f)
-                typeface = android.graphics.Typeface.MONOSPACE
-                setPadding(0, dp(6), 0, 0)
-                maxLines = 1
-                ellipsize = android.text.TextUtils.TruncateAt.START
+            // 面包屑行:超出卡片宽度时横向滑动;点任一级直接选中该祖先
+            val crumbRow = LinearLayout(service).apply {
+                orientation = LinearLayout.HORIZONTAL
+                gravity = Gravity.CENTER_VERTICAL
+            }
+            crumbs.forEachIndexed { ci, (name, idx) ->
+                if (ci > 0) {
+                    crumbRow.addView(TextView(service).apply {
+                        text = " > "
+                        setTextColor(0x50FFFFFF.toInt())
+                        setTextSize(TypedValue.COMPLEX_UNIT_SP, 9f)
+                        typeface = android.graphics.Typeface.MONOSPACE
+                    })
+                }
+                crumbRow.addView(TextView(service).apply {
+                    text = name
+                    setTextColor(0x99FFFFFF.toInt())
+                    setTextSize(TypedValue.COMPLEX_UNIT_SP, 9f)
+                    typeface = android.graphics.Typeface.MONOSPACE
+                    // 点击面包屑某一级 = 选中该祖先节点
+                    setOnClickListener { select(idx) }
+                })
+            }
+            val crumbScroll = HorizontalScrollView(service).apply {
+                isHorizontalScrollBarEnabled = false
+                addView(crumbRow)
+            }
+            block.addView(crumbScroll, LinearLayout.LayoutParams(
+                LinearLayout.LayoutParams.MATCH_PARENT,
+                LinearLayout.LayoutParams.WRAP_CONTENT).apply {
+                topMargin = dp(6)
             })
+            // 选中后重渲染,默认让最右(最近祖先)可见
+            crumbScroll.post { crumbScroll.fullScroll(View.FOCUS_RIGHT) }
         }
         container.addView(block, LinearLayout.LayoutParams(
             LinearLayout.LayoutParams.MATCH_PARENT,

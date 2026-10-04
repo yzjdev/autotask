@@ -19,6 +19,14 @@ import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.foundation.background
+import androidx.compose.foundation.gestures.detectVerticalDragGestures
+import androidx.compose.foundation.layout.BoxWithConstraints
+import androidx.compose.ui.draw.clip
+import androidx.compose.ui.input.pointer.pointerInput
+import androidx.compose.ui.platform.LocalDensity
+import androidx.compose.ui.unit.IntOffset
+import androidx.compose.ui.unit.dp
+import androidx.compose.foundation.layout.offset
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.BorderStroke
@@ -52,6 +60,7 @@ import androidx.compose.material.icons.filled.Adjust
 import androidx.compose.material.icons.filled.Apps
 import androidx.compose.material.icons.filled.Block
 import androidx.compose.material.icons.filled.Language
+import androidx.compose.material.icons.filled.List
 import androidx.compose.material.icons.filled.WifiOff
 import androidx.compose.material.icons.filled.Wifi
 import androidx.compose.material.icons.filled.Check
@@ -301,6 +310,10 @@ fun AutomationScreen() {
         if (editingRuleId != null) editingRuleId = null
         taskPagePkg = null
     }
+    // 规则导航页的编辑态:系统返回键回到规则列表
+    BackHandler(enabled = tab == 2 && editingRuleId != null) {
+        editingRuleId = null
+    }
     // 应用列表滚动状态:提升到顶层,进入任务页/规则页(AppsScreen 离开组合)返回后恢复位置
     val appsListState = rememberLazyListState()
     // 包名 → 显示名:优先已装应用标签,任务残留包回退 PackageManager 查询/原包名
@@ -415,6 +428,13 @@ fun AutomationScreen() {
                     NavigationBarItem(
                         selected = tab == 2,
                         onClick = { tab = 2 },
+                        icon = { Icon(Icons.Filled.List, contentDescription = null) },
+                        label = { Text("规则") },
+                        colors = navItemColors,
+                    )
+                    NavigationBarItem(
+                        selected = tab == 3,
+                        onClick = { tab = 3 },
                         icon = { Icon(Icons.AutoMirrored.Filled.Article, contentDescription = null) },
                         label = { Text("日志") },
                         colors = navItemColors,
@@ -488,7 +508,41 @@ fun AutomationScreen() {
                     modifier = Modifier.padding(innerPadding),
                 )
             }
-            2 -> LogsScreen(modifier = Modifier.padding(innerPadding))
+            2 -> {
+                val editId = editingRuleId
+                if (editId != null) {
+                    // 规则导航页 → 编辑页;返回回到规则列表
+                    RuleEditorPage(
+                        pkg = tasks.firstOrNull { it.id == editId }?.packageName.orEmpty(),
+                        existing = tasks.firstOrNull { it.id == editId },
+                        onSave = { saved ->
+                            persistTasks(
+                                if (tasks.any { it.id == saved.id }) {
+                                    tasks.map { if (it.id == saved.id) saved else it }
+                                } else {
+                                    tasks + saved
+                                },
+                            )
+                            editingRuleId = null
+                        },
+                        onBack = { editingRuleId = null },
+                        modifier = Modifier.padding(innerPadding),
+                    )
+                } else {
+                    AllRulesPage(
+                        tasks = tasks,
+                        installedApps = installedApps,
+                        labelByPkg = labelByPkg,
+                        onToggleTask = { id, enabled ->
+                            persistTasks(tasks.map { if (it.id == id) it.copy(enabled = enabled) else it })
+                        },
+                        onEditTask = { editingRuleId = it },
+                        onPersistTasks = { persistTasks(it) },
+                        modifier = Modifier.padding(innerPadding),
+                    )
+                }
+            }
+            3 -> LogsScreen(modifier = Modifier.padding(innerPadding))
             else -> HomeScreen(
                 context = context,
                 uiState = uiState,
@@ -1587,6 +1641,318 @@ private fun AppToggleRow(
     }
 }
 
+/** 规则导航页:所有规则一屏展示,同名规则按标题合并(内容不合并)。
+ * 全局规则(packageName 空)永远第一;合并卡展开显示所属应用,点击进入对应规则。
+ */
+@Composable
+private fun AllRulesPage(
+    tasks: List<GkdTask>,
+    installedApps: List<TaskStore.AppInfo>?,
+    labelByPkg: Map<String, String>,
+    onToggleTask: (String, Boolean) -> Unit,
+    onEditTask: (String) -> Unit,
+    onPersistTasks: (List<GkdTask>) -> Unit,
+    modifier: Modifier = Modifier,
+) {
+    // 长按删除确认:记录待删除任务 id
+    var pendingDeleteId by remember { mutableStateOf<String?>(null) }
+    pendingDeleteId?.let { delId ->
+        val del = tasks.firstOrNull { it.id == delId } ?: return@let
+        AlertDialog(
+            onDismissRequest = { pendingDeleteId = null },
+            title = { Text("删除规则") },
+            text = { Text("确定删除「${del.name.ifEmpty { del.actionsSummary }}」?") },
+            confirmButton = {
+                TextButton(onClick = {
+                    onPersistTasks(tasks - del)
+                    pendingDeleteId = null
+                }) { Text("删除", color = MaterialTheme.colorScheme.error) }
+            },
+            dismissButton = {
+                TextButton(onClick = { pendingDeleteId = null }) { Text("取消") }
+            },
+        )
+    }
+
+    Column(modifier = modifier.fillMaxSize()) {
+        // 顶栏:标题 + 规则总数
+        Row(
+            modifier = Modifier
+                .fillMaxWidth()
+                .padding(horizontal = 16.dp, vertical = 12.dp),
+            verticalAlignment = Alignment.CenterVertically,
+        ) {
+            Text(
+                text = "全部规则",
+                style = MaterialTheme.typography.titleLarge,
+                fontWeight = FontWeight.Bold,
+                modifier = Modifier.weight(1f),
+            )
+            Text(
+                text = "${tasks.count { it.packageName.isEmpty() || installedApps?.any { a -> a.packageName == it.packageName } != false }} 条",
+                style = MaterialTheme.typography.bodyMedium,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+            )
+        }
+
+        // 列表滚动状态:快速滑动条拖动定位用
+        val listState = rememberLazyListState()
+        // 同名合并:按显示标题(名称,空回退动作摘要)归组;全局规则永远第一;
+        // 未安装应用的规则不展示(规则仍保留在任务表中,装回后自动恢复)
+        val installedPkgs = (installedApps ?: emptyList()).map { it.packageName }.toSet()
+        val globals = tasks.filter { it.packageName.isEmpty() }
+        val apps = tasks.filter { it.packageName.isNotEmpty() && it.packageName in installedPkgs }
+        val visible = globals + apps
+        val merged = visible
+            .groupBy { it.name.ifEmpty { it.actionsSummary } }
+            .map { (title, list) ->
+                // 组内排序:全局规则在前,其余保持任务表原序
+                Triple(title, list.filter { it.packageName.isEmpty() } + list.filter { it.packageName.isNotEmpty() }, list.any { it.enabled })
+            }
+        // 排序:含全局规则的合并卡最前,其次按标题
+        val orderedGroups = merged.sortedWith(
+            compareByDescending<Triple<String, List<GkdTask>, Boolean>> { it.second.first().packageName.isEmpty() }
+                .thenBy { it.first }
+        )
+        Box(modifier = Modifier.fillMaxSize()) {
+            LazyColumn(
+                state = listState,
+                modifier = Modifier.fillMaxSize(),
+                contentPadding = PaddingValues(start = 16.dp, end = 16.dp, bottom = 32.dp),
+                verticalArrangement = Arrangement.spacedBy(8.dp),
+            ) {
+            items(orderedGroups.size, key = { orderedGroups[it].first }, contentType = { "group" }) { i ->
+                val (title, groupTasks, anyEnabled) = orderedGroups[i]
+                MergedRuleCard(
+                    title = title,
+                    groupTasks = groupTasks,
+                    anyEnabled = anyEnabled,
+                    labelByPkg = labelByPkg,
+                    onToggleTask = onToggleTask,
+                    onEditTask = onEditTask,
+                    onLongPress = { pendingDeleteId = it },
+                )
+            }
+
+            if (visible.isEmpty()) {
+                item {
+                    Text(
+                        text = "暂无规则。在「应用」tab 选择应用后新建。",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    )
+                }
+            }
+            }
+            // 快速滑动条:覆盖在列表右侧,拖动跳转
+            FastScrollbar(
+                listState = listState,
+                itemCount = orderedGroups.size + if (visible.isEmpty()) 1 else 0,
+                modifier = Modifier.align(Alignment.CenterEnd),
+            )
+        }
+    }
+}
+
+/** 快速滑动条:右侧细轨道 + 滑块,拖动按比例跳转列表项 */
+@Composable
+private fun FastScrollbar(
+    listState: androidx.compose.foundation.lazy.LazyListState,
+    itemCount: Int,
+    modifier: Modifier = Modifier,
+) {
+    if (itemCount < 8) return
+    val scope = rememberCoroutineScope()
+    // 拖动中:滑块高亮并直接定位;列表自身滚动时滑块同步位置
+    var dragging by remember { mutableStateOf(false) }
+    val canScroll = listState.canScrollForward || listState.canScrollBackward
+    val thumbFraction = 0.15f
+
+    fun jumpTo(fraction: Float) {
+        val clamped = fraction.coerceIn(0f, 1f)
+        val maxIndex = (itemCount - 1).coerceAtLeast(0)
+        val target = (clamped * maxIndex).toInt().coerceIn(0, maxIndex)
+        scope.launch { listState.scrollToItem(target) }
+    }
+
+    if (!canScroll) return
+    BoxWithConstraints(modifier = modifier.width(28.dp).fillMaxHeightIfPossible()) {
+        val density = LocalDensity.current
+        val trackHeight = constraints.maxHeight.toFloat()
+        val thumbHeight = (trackHeight * thumbFraction).coerceAtLeast(48f)
+        val listFraction = if (itemCount > 1) {
+            listState.firstVisibleItemIndex.toFloat() / (itemCount - 1)
+        } else 0f
+        val thumbY = (trackHeight - thumbHeight) * listFraction
+        Box(
+            modifier = Modifier
+                .width(6.dp)
+                .height(with(density) { trackHeight.toDp() })
+                .align(Alignment.Center)
+                .clip(MaterialTheme.shapes.small)
+                .background(MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.6f)),
+        )
+        Box(
+            modifier = Modifier
+                .width(6.dp)
+                .height(with(density) { thumbHeight.toDp() })
+                .offset { IntOffset(0, thumbY.toInt()) }
+                .clip(MaterialTheme.shapes.small)
+                .background(
+                    if (dragging) MaterialTheme.colorScheme.primary
+                    else MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.5f),
+                )
+                .pointerInput(itemCount) {
+                    detectVerticalDragGestures(
+                        onDragStart = { offset ->
+                            dragging = true
+                            // 按下位置直接映射到列表位置,开始拖动即跳转
+                            jumpTo(offset.y / trackHeight)
+                        },
+                        onVerticalDrag = { change, _ ->
+                            jumpTo(change.position.y / trackHeight)
+                        },
+                        onDragEnd = { dragging = false },
+                        onDragCancel = { dragging = false },
+                    )
+                },
+        )
+    }
+}
+
+/** 同名合并的规则卡片:收起时一条摘要,展开后逐条显示所属应用,点击进入对应规则 */
+@Composable
+private fun MergedRuleCard(
+    title: String,
+    groupTasks: List<GkdTask>,
+    anyEnabled: Boolean,
+    labelByPkg: Map<String, String>,
+    onToggleTask: (String, Boolean) -> Unit,
+    onEditTask: (String) -> Unit,
+    onLongPress: (String) -> Unit,
+) {
+    var expanded by remember { mutableStateOf(false) }
+    val accent = if (anyEnabled) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.outlineVariant
+    Card(
+        modifier = Modifier.fillMaxWidth(),
+        colors = CardDefaults.cardColors(
+            containerColor = if (anyEnabled) {
+                MaterialTheme.colorScheme.primaryContainer.copy(alpha = 0.35f)
+            } else {
+                MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.45f)
+            },
+        ),
+        shape = MaterialTheme.shapes.large,
+    ) {
+        Column {
+            // 头部:点按展开/收起,长按删除组内全部规则
+            Row(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .combinedClickable(
+                        onClick = { expanded = !expanded },
+                        onLongClick = { groupTasks.forEach { onLongPress(it.id) } },
+                    )
+                    .padding(start = 14.dp, end = 14.dp, top = 14.dp, bottom = if (expanded) 6.dp else 14.dp),
+                verticalAlignment = Alignment.CenterVertically,
+            ) {
+                StatusDot(active = anyEnabled, accent = accent, size = 9.dp)
+                Spacer(modifier = Modifier.width(12.dp))
+                Text(
+                    text = title,
+                    style = MaterialTheme.typography.titleSmall,
+                    fontWeight = FontWeight.SemiBold,
+                    maxLines = 2,
+                    overflow = TextOverflow.Ellipsis,
+                    modifier = Modifier.weight(1f),
+                )
+                Spacer(modifier = Modifier.width(8.dp))
+                // 组内含全局规则时标注
+                if (groupTasks.any { it.packageName.isEmpty() }) {
+                    Surface(
+                        shape = MaterialTheme.shapes.small,
+                        color = MaterialTheme.colorScheme.secondary.copy(alpha = 0.18f),
+                    ) {
+                        Text(
+                            text = "全局",
+                            style = MaterialTheme.typography.labelSmall,
+                            color = MaterialTheme.colorScheme.secondary,
+                            modifier = Modifier.padding(horizontal = 5.dp, vertical = 1.dp),
+                        )
+                    }
+                    Spacer(modifier = Modifier.width(6.dp))
+                }
+                // 合并条数 + 订阅角标(组内任一为订阅导入即标)
+                SourceBadge(isRemote = groupTasks.any { it.isFromSubscription })
+                Spacer(modifier = Modifier.width(8.dp))
+                Surface(
+                    shape = MaterialTheme.shapes.small,
+                    color = MaterialTheme.colorScheme.surfaceContainer,
+                ) {
+                    Text(
+                        text = "${groupTasks.size}",
+                        style = MaterialTheme.typography.labelSmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        modifier = Modifier.padding(horizontal = 6.dp, vertical = 2.dp),
+                    )
+                }
+                Spacer(modifier = Modifier.width(6.dp))
+                Icon(
+                    imageVector = if (expanded) Icons.Filled.KeyboardArrowUp else Icons.Filled.KeyboardArrowDown,
+                    contentDescription = if (expanded) "收起" else "展开",
+                    tint = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
+            }
+
+            // 展开区:逐条列出,行内开关 + 点行进入编辑,长按删除该条
+            if (expanded) {
+                groupTasks.forEach { task ->
+                    val rowAccent = if (task.enabled) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.outlineVariant
+                    val isGlobal = task.packageName.isEmpty()
+                    val rowLabel = if (isGlobal) "全局规则" else (labelByPkg[task.packageName] ?: task.packageName)
+                    Row(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .combinedClickable(
+                                onClick = { onEditTask(task.id) },
+                                onLongClick = { onLongPress(task.id) },
+                            )
+                            .padding(start = 14.dp, end = 14.dp, top = 6.dp, bottom = 6.dp),
+                        verticalAlignment = Alignment.CenterVertically,
+                    ) {
+                        StatusDot(active = task.enabled, accent = rowAccent, size = 7.dp)
+                        Spacer(modifier = Modifier.width(10.dp))
+                        Column(modifier = Modifier.weight(1f)) {
+                            Text(
+                                text = rowLabel,
+                                style = MaterialTheme.typography.bodyMedium,
+                                maxLines = 1,
+                                overflow = TextOverflow.Ellipsis,
+                            )
+                            Text(
+                                text = buildString {
+                                    if (task.activityIds.isNotEmpty()) append("Activity≈${task.activityIds.first()} · ")
+                                    val trigger = task.rules.firstOrNull()?.matches?.firstOrNull()
+                                    append(if (trigger != null) "触发:${trigger.expr}" else "页面就绪即触发")
+                                },
+                                style = MaterialTheme.typography.bodySmall,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                maxLines = 1,
+                                overflow = TextOverflow.Ellipsis,
+                            )
+                        }
+                        Switch(
+                            checked = task.enabled,
+                            onCheckedChange = { onToggleTask(task.id, it) },
+                        )
+                    }
+                }
+                Spacer(modifier = Modifier.height(8.dp))
+            }
+        }
+    }
+}
+
 /** 独立任务页:单个应用的任务列表(开关/编辑)+ 新建入口;返回栏显示应用名,数据由上层持有 */
 @Composable
 private fun TaskListPage(
@@ -2300,65 +2666,6 @@ private fun RuleEditorPage(
                 hint = "例: [text*=\"跳过\"][clickable=true];支持多行,动作目标 = 最后一行",
                 minLines = 2,
             )
-            // 试匹配:用当前屏幕实际跑一遍选择器,报告每行命中数与目标节点信息
-            var testResult by remember { mutableStateOf<String?>(null) }
-            Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                OutlinedButton(
-                    onClick = {
-                        val lines = matchesText.lines().map { it.trim() }
-                            .filter { it.isNotEmpty() && !it.startsWith("//") }
-                        if (lines.isEmpty()) {
-                            testResult = "matches 为空,无可测试内容"
-                        } else runCatching {
-                            val root = DramaAccessibilityService.instance?.rootInActiveWindow
-                            if (root == null) {
-                                testResult = "无法获取当前屏幕(无障碍服务未连接或无前台窗口)"
-                            } else {
-                                val sb = StringBuilder()
-                                lines.forEach { expr ->
-                                    val sel = GkdSelector.parse(expr)
-                                    val nodes = sel.find(root)
-                                    sb.appendLine("「${expr.take(36)}${if (expr.length > 36) "…" else ""}」命中 ${nodes.size} 个节点")
-                                    nodes.take(3).forEach { n ->
-                                        val r = android.graphics.Rect()
-                                        n.getBoundsInScreen(r)
-                                        val txt = n.text?.toString()?.take(16) ?: n.contentDescription?.toString()?.take(16) ?: ""
-                                        sb.appendLine("   ↳ [$txt] clickable=${n.isClickable} 边界=(${r.left},${r.top},${r.right},${r.bottom})")
-                                    }
-                                }
-                                testResult = sb.toString().trim()
-                            }
-                        }.getOrElse { testResult = "测试失败: ${it.message}" }
-                    },
-                    enabled = DramaAccessibilityService.isRunning,
-                ) { Text("▶ 试匹配当前屏幕") }
-                if (!DramaAccessibilityService.isRunning) {
-                    Text("服务未连接", style = MaterialTheme.typography.labelSmall,
-                        color = MaterialTheme.colorScheme.onSurfaceVariant)
-                }
-            }
-            testResult?.let { r ->
-                Surface(
-                    shape = MaterialTheme.shapes.small,
-                    color = MaterialTheme.colorScheme.surfaceContainerHigh,
-                    modifier = Modifier.fillMaxWidth(),
-                ) {
-                    Row(modifier = Modifier.padding(10.dp), verticalAlignment = Alignment.Top) {
-                        Text(
-                            r,
-                            style = MaterialTheme.typography.bodySmall.copy(
-                                fontFamily = androidx.compose.ui.text.font.FontFamily.Monospace,
-                            ),
-                            modifier = Modifier.weight(1f),
-                        )
-                        TextButton(onClick = {
-                            val cm = context.getSystemService(android.content.Context.CLIPBOARD_SERVICE) as android.content.ClipboardManager
-                            cm.setPrimaryClip(android.content.ClipData.newPlainText("test", r))
-                            Toast.makeText(context, "已复制", Toast.LENGTH_SHORT).show()
-                        }) { Text("复制") }
-                    }
-                }
-            }
             SelectorExprField(
                 value = anyMatchesText,
                 onChange = { anyMatchesText = it },

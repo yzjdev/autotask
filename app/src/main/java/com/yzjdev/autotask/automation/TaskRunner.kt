@@ -183,20 +183,6 @@ class TaskRunner(private val service: DramaAccessibilityService) {
         jobs.remove(taskId)?.cancel()
     }
 
-    /** 手动执行一次规则组(测试页用):不走触发匹配,不校验前台包名 */
-    fun runManually(task: GkdTask) {
-        LogStore.log("▶ 手动执行「${task.actionsSummary}」")
-        scope.launch {
-            try {
-                val root = service.rootInActiveWindow
-                task.rules.forEach { rule ->
-                    if (root == null || ruleMatches(root, rule)) executeRule(task, rule)
-                }
-            } catch (_: kotlinx.coroutines.CancellationException) {
-            }
-        }
-    }
-
     fun cancelAll() {
         jobs.values.forEach { it.cancel() }
         jobs.clear()
