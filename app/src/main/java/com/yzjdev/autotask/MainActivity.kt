@@ -56,11 +56,11 @@ import androidx.compose.material.icons.automirrored.filled.ArrowBack
 import androidx.compose.material.icons.automirrored.filled.KeyboardArrowRight
 import androidx.compose.material.icons.filled.AccessibilityNew
 import androidx.compose.material.icons.automirrored.filled.Article
+import androidx.compose.material.icons.automirrored.filled.List
 import androidx.compose.material.icons.filled.Adjust
 import androidx.compose.material.icons.filled.Apps
 import androidx.compose.material.icons.filled.Block
 import androidx.compose.material.icons.filled.Language
-import androidx.compose.material.icons.filled.List
 import androidx.compose.material.icons.filled.WifiOff
 import androidx.compose.material.icons.filled.Wifi
 import androidx.compose.material.icons.filled.Check
@@ -81,6 +81,7 @@ import androidx.compose.material.icons.filled.BatterySaver
 import androidx.compose.material.icons.filled.PlayCircleOutline
 import androidx.compose.material.icons.filled.PowerSettingsNew
 import androidx.compose.material.icons.filled.Security
+import androidx.compose.material.icons.automirrored.filled.Rule
 import androidx.compose.material.icons.filled.SwipeVertical
 import androidx.compose.material.icons.filled.Timer
 import androidx.compose.material.icons.filled.TouchApp
@@ -112,6 +113,7 @@ import androidx.compose.material3.Surface
 import androidx.compose.material3.Tab
 import androidx.compose.material3.PrimaryTabRow
 import androidx.compose.material3.Switch
+import androidx.compose.material3.SwitchDefaults
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
@@ -153,14 +155,16 @@ import androidx.compose.ui.draw.clip
 import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.drop
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.sync.Mutex
+import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.withContext
 import com.yzjdev.autotask.automation.AutomationManager
 import com.yzjdev.autotask.automation.DramaAccessibilityService
 import com.yzjdev.autotask.automation.ShizukuShell
 import com.yzjdev.autotask.automation.LogStore
-import com.yzjdev.autotask.automation.NetPolicyStore
 import com.yzjdev.autotask.automation.GkdSelector
 import com.yzjdev.autotask.automation.Action
 import com.yzjdev.autotask.automation.GkdTask
@@ -207,6 +211,19 @@ fun setRecentsHidden(context: android.content.Context, hidden: Boolean) {
     if (context is android.app.Activity) applyRecentsHidden(context)
 }
 
+// 禁网清单持久化:开关命令成功后落盘,启动直接恢复;实时查询仅作校正,不再作为状态来源
+private const val PREFS_NET = "net_policy"
+private const val KEY_NET_BLOCKED = "blocked_pkgs"
+
+private fun loadNetBlocked(context: android.content.Context): Set<String> =
+    context.getSharedPreferences(PREFS_NET, android.content.Context.MODE_PRIVATE)
+        .getStringSet(KEY_NET_BLOCKED, emptySet()) ?: emptySet()
+
+private fun saveNetBlocked(context: android.content.Context, pkgs: Set<String>) {
+    context.getSharedPreferences(PREFS_NET, android.content.Context.MODE_PRIVATE)
+        .edit().putStringSet(KEY_NET_BLOCKED, pkgs).apply()
+}
+
 /** 按当前偏好应用排除最近任务(需在 Activity 存活时调用才对本任务生效) */
 private fun applyRecentsHidden(activity: android.app.Activity) {
     val hidden = isRecentsHidden(activity)
@@ -238,21 +255,29 @@ fun AutomationScreen() {
     var overlayOn by remember {
         mutableStateOf(DramaAccessibilityService.isRunning && DramaAccessibilityService.instance?.isDebugOverlayShowing == true)
     }
-    // 订阅无障碍服务连接状态:服务断开时悬浮窗已被服务 hide(),同步复位开关状态
+    // 服务实例绑定状态:可观察(连接/断开回调驱动),供「待连接」判定与 UI 自动刷新
+    var serviceBound by remember { mutableStateOf(DramaAccessibilityService.isRunning) }
+    // 订阅无障碍服务连接状态:连接/断开同步绑定状态;服务断开时悬浮窗已被服务 hide(),同步复位开关状态
     DisposableEffect(Unit) {
-        val listener = { running: Boolean -> if (!running) overlayOn = false }
+        val listener = { running: Boolean ->
+            serviceBound = running
+            if (!running) overlayOn = false
+        }
         DramaAccessibilityService.addStateListener(listener)
         onDispose { DramaAccessibilityService.removeStateListener(listener) }
     }
-    // 禁网恢复:进入界面时执行一次(VPN 授权为系统级持久授权,重启后直接重启服务即可)
-    val scope = rememberCoroutineScope()
-    var netPolicyRestored by remember { mutableStateOf(false) }
-    LaunchedEffect(Unit) {
-        if (!netPolicyRestored) {
-            netPolicyRestored = true
-            withContext(Dispatchers.IO) { restoreNetPolicies(context) }
+    // 待连接轮询:设置已开但服务实例未绑定(中间态)时每秒刷新,直至 onServiceConnected 完成
+    LaunchedEffect(uiState.isAccessibilityEnabled, serviceBound) {
+        if (uiState.isAccessibilityEnabled && !serviceBound) {
+            while (!DramaAccessibilityService.isRunning) {
+                delay(1000)
+                automation.refresh()
+            }
+            serviceBound = true
         }
     }
+    // 禁网恢复:进入界面时执行一次(VPN 授权为系统级持久授权,重启后直接重启服务即可)
+    val scope = rememberCoroutineScope()
 
     // ---- 应用 tab 共享数据:提升到顶层,切 tab 不销毁、不重新加载 ----
     // 规则多时 JSON 反序列化耗时会卡首帧,初始空表 + 后台加载
@@ -300,15 +325,14 @@ fun AutomationScreen() {
     var appTab by rememberSaveable { mutableStateOf(0) }
     // 应用 tab → 任务页导航:null = 停留在应用列表;非空 = 该包名的独立任务页(全屏,隐藏底部导航)
     var taskPagePkg by rememberSaveable { mutableStateOf<String?>(null) }
-    // 禁网应用清单:提升到顶层,应用信息抽屉改开关后即时同步到列表角标
-    var netBlockedPkgs by remember { mutableStateOf(NetPolicyStore.loadBlocked(context)) }
+    // 禁网应用清单:持久化为准,提升到顶层,应用信息抽屉改开关后即时同步到列表角标
+    var netBlockedPkgs by remember { mutableStateOf(loadNetBlocked(context)) }
     // 任务页 → 规则编辑页:null = 停留在任务页;非空 = 正在编辑该 id 的规则(新建时为临时标记)
     var editingRuleId by rememberSaveable { mutableStateOf<String?>(null) }
     // 任务页/编辑页独立显示时接管系统返回键:
-    // 规则编辑页返回 = 直接回到应用列表(跳过任务页);任务页返回 = 回应用列表
+    // 规则编辑页返回 = 回到任务页规则列表;任务页返回 = 回应用列表
     BackHandler(enabled = taskPagePkg != null) {
-        if (editingRuleId != null) editingRuleId = null
-        taskPagePkg = null
+        if (editingRuleId != null) editingRuleId = null else taskPagePkg = null
     }
     // 规则导航页的编辑态:系统返回键回到规则列表
     BackHandler(enabled = tab == 2 && editingRuleId != null) {
@@ -391,6 +415,22 @@ fun AutomationScreen() {
         }
     }
 
+    // 禁网状态校正轮询:持久化清单为状态来源,查询仅补充确认(外部已禁网的包同步进 UI);
+    // 查询不可靠(binder 抖动/输出缺失),故失败或"allow"都不删清单项,也不落盘
+    LaunchedEffect(tab, appTab, installedApps) {
+        if (tab != 1) return@LaunchedEffect
+        val infos = installedApps ?: return@LaunchedEffect
+        val wantSystem = appTab == 1
+        val pkgs = infos.filter { it.isSystem == wantSystem }.map { it.packageName }
+        if (pkgs.isEmpty()) return@LaunchedEffect
+        while (true) {
+            delay(10_000)
+            val confirmed = withContext(Dispatchers.IO) { queryNetworkBlockedBatch(pkgs) }
+            val newlyBlocked = confirmed.filter { it.value }.keys - netBlockedPkgs
+            if (newlyBlocked.isNotEmpty()) netBlockedPkgs = netBlockedPkgs + newlyBlocked
+        }
+    }
+
     automation.observe(lifecycleOwner) { state ->
         uiState = state
     }
@@ -428,7 +468,7 @@ fun AutomationScreen() {
                     NavigationBarItem(
                         selected = tab == 2,
                         onClick = { tab = 2 },
-                        icon = { Icon(Icons.Filled.List, contentDescription = null) },
+                        icon = { Icon(Icons.AutoMirrored.Filled.List, contentDescription = null) },
                         label = { Text("规则") },
                         colors = navItemColors,
                     )
@@ -502,9 +542,8 @@ fun AutomationScreen() {
                         val cur = netBlockedPkgs.toMutableSet()
                         if (blocked) cur += pkg else cur -= pkg
                         netBlockedPkgs = cur
-                        NetPolicyStore.setBlocked(context, pkg, blocked)
+                        saveNetBlocked(context, cur)
                     },
-                    appsLoading = installedApps == null,
                     modifier = Modifier.padding(innerPadding),
                 )
             }
@@ -546,6 +585,7 @@ fun AutomationScreen() {
             else -> HomeScreen(
                 context = context,
                 uiState = uiState,
+                serviceBound = serviceBound,
                 overlayOn = overlayOn,
                 onOverlayToggle = {
                     val target = !overlayOn
@@ -598,12 +638,15 @@ fun AutomationScreen() {
 private fun HomeScreen(
     context: android.content.Context,
     uiState: AutomationManager.State,
+    serviceBound: Boolean,
     overlayOn: Boolean,
     onOverlayToggle: () -> Unit,
     onToggleAccessibility: () -> Unit,
     modifier: Modifier = Modifier,
 ) {
-    val serviceConnected = uiState.isAccessibilityEnabled && DramaAccessibilityService.instance != null
+    // 已连接 = 设置已开 且 服务实例已绑定;待连接 = 设置已开但实例尚未绑定(中间态)
+    val serviceConnected = uiState.isAccessibilityEnabled && serviceBound
+    val servicePending = uiState.isAccessibilityEnabled && !serviceConnected
     var recentsHidden by remember { mutableStateOf(isRecentsHidden(context)) }
 
     Column(
@@ -615,11 +658,12 @@ private fun HomeScreen(
             .padding(bottom = 32.dp),
         verticalArrangement = Arrangement.spacedBy(12.dp),
     ) {
-        TitleBar(serviceConnected = serviceConnected)
+        TitleBar(serviceConnected = serviceConnected, servicePending = servicePending)
 
         // 中控面板:电源拨盘 + 状态文案
         ControlPanel(
             serviceConnected = serviceConnected,
+            servicePending = servicePending,
             accessibilityEnabled = uiState.isAccessibilityEnabled,
             hasSecureSetting = uiState.hasSecureSetting,
             onToggle = onToggleAccessibility,
@@ -761,11 +805,17 @@ private fun HomeScreen(
 @Composable
 private fun ControlPanel(
     serviceConnected: Boolean,
+    servicePending: Boolean,
     accessibilityEnabled: Boolean,
     hasSecureSetting: Boolean,
     onToggle: () -> Unit,
 ) {
-    val accent = if (serviceConnected) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.outline
+    // 已连接 = 主色;待连接 = 三级色 + 旋转光环;未开启 = 灰
+    val accent = when {
+        serviceConnected -> MaterialTheme.colorScheme.primary
+        servicePending -> MaterialTheme.colorScheme.tertiary
+        else -> MaterialTheme.colorScheme.outline
+    }
     Card(
         modifier = Modifier.fillMaxWidth(),
         colors = CardDefaults.cardColors(
@@ -796,7 +846,7 @@ private fun ControlPanel(
                             ),
                     )
                 }
-                // 状态光环
+                // 状态光环:已连接满环;待连接旋转(不确定进度);未开启空环
                 CircularProgressIndicator(
                     progress = { if (serviceConnected) 1f else 0f },
                     modifier = Modifier.size(168.dp),
@@ -804,6 +854,14 @@ private fun ControlPanel(
                     trackColor = MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.4f),
                     strokeWidth = 4.dp,
                 )
+                if (servicePending) {
+                    CircularProgressIndicator(
+                        modifier = Modifier.size(168.dp),
+                        color = accent,
+                        trackColor = Color.Transparent,
+                        strokeWidth = 4.dp,
+                    )
+                }
                 // 中央电源按钮
                 Surface(
                     onClick = onToggle,
@@ -832,20 +890,14 @@ private fun ControlPanel(
             }
             Spacer(modifier = Modifier.height(20.dp))
             Text(
-                text = if (serviceConnected) "服务运行中" else "服务未开启",
+                text = when {
+                    serviceConnected -> "服务运行中"
+                    servicePending -> "服务待连接"
+                    else -> "服务未开启"
+                },
                 style = MaterialTheme.typography.titleMedium,
                 fontWeight = FontWeight.Bold,
                 color = MaterialTheme.colorScheme.onSurface,
-            )
-            Spacer(modifier = Modifier.height(4.dp))
-            Text(
-                text = when {
-                    serviceConnected -> "任务可自动执行"
-                    !hasSecureSetting -> "点击拨盘自动授权并开启"
-                    else -> "点击拨盘开启无障碍服务"
-                },
-                style = MaterialTheme.typography.bodySmall,
-                color = MaterialTheme.colorScheme.onSurfaceVariant,
             )
         }
     }
@@ -907,15 +959,6 @@ private fun TogglePill(
                 },
             )
             Spacer(modifier = Modifier.weight(1f))
-            // 胶囊右端状态圆点
-            Box(
-                modifier = Modifier
-                    .size(10.dp)
-                    .background(
-                        if (checked) accent else MaterialTheme.colorScheme.outlineVariant,
-                        shape = CircleShape,
-                    ),
-            )
         }
     }
 }
@@ -1004,6 +1047,16 @@ private data class AppRow(
     val installed: Boolean = true,
 )
 
+/** 场景流步骤编辑草稿:文本态字段,保存时解析为 GkdTask.Step */
+private data class StepDraft(
+    val name: String,
+    val matchesText: String,
+    val actionKind: String,
+    val waitTimeoutText: String,
+    val settleTimeText: String,
+    val skipOnTimeout: Boolean,
+)
+
 /** 应用 tab:用户应用 / 系统应用分 tab,标题栏内搜索;点应用进入该应用的独立任务页,长按弹出应用信息抽屉 */
 @OptIn(ExperimentalFoundationApi::class, ExperimentalMaterial3Api::class)
 @Composable
@@ -1020,7 +1073,6 @@ private fun AppsScreen(
     onSortModeChange: (Int) -> Unit,
     netBlockedPkgs: Set<String>,
     onNetworkBlocked: (String, Boolean) -> Unit,
-    appsLoading: Boolean = false,
     modifier: Modifier = Modifier,
 ) {
     val context = LocalContext.current
@@ -1129,11 +1181,6 @@ private fun AppsScreen(
 
         Spacer(modifier = Modifier.height(12.dp))
 
-        // 首次加载应用列表:骨架屏流光占位,避免误显示「未找到」
-        val showLoading = appsLoading && visibleApps.isEmpty()
-        if (showLoading) {
-            AppsLoadingView()
-        } else {
         // 滚动状态由上层传入:进入任务页/规则页返回后恢复上一次滚动位置
         Box(modifier = Modifier.fillMaxSize()) {
         LazyColumn(
@@ -1173,7 +1220,6 @@ private fun AppsScreen(
             modifier = Modifier.align(Alignment.CenterEnd),
         )
         }
-        }
     }
 
     // 长按弹出的应用信息/功能开关抽屉
@@ -1187,94 +1233,7 @@ private fun AppsScreen(
     }
 }
 
-/** 应用列表骨架屏:卡片形占位(图标圆 + 文字条)+ 流光扫过,加载完成前展示 */
-@Composable
-private fun AppsLoadingView() {
-    // 流光位置:0f(左外) → 1f(右外),扫过一遍约 1.4s
-    val transition = rememberInfiniteTransition(label = "shimmer")
-    val pos by transition.animateFloat(
-        initialValue = 0f,
-        targetValue = 1f,
-        animationSpec = infiniteRepeatable(
-            animation = tween(durationMillis = 1400, easing = FastOutSlowInEasing),
-            repeatMode = RepeatMode.Restart,
-        ),
-        label = "shimmerPos",
-    )
-    val scheme = MaterialTheme.colorScheme
-    // 流光渐变:base 底色 + 一条高亮光带随 pos 横移(光带宽 ≈ 卡片宽 35%)
-    val base = scheme.surfaceVariant.copy(alpha = 0.5f)
-    val band = scheme.surfaceContainerHighest.copy(alpha = 0.9f)
-    // 每张卡各自按自身尺寸扫光,drawWithContent 拿到真实 size 不依赖固定 px
-    fun Modifier.shimmer(): Modifier = this.drawWithContent {
-        drawContent()
-        drawRect(
-            brush = Brush.linearGradient(
-                colors = listOf(Color.Transparent, band, Color.Transparent),
-                start = Offset(size.width * (pos * 1.6f - 0.6f), 0f),
-                end = Offset(size.width * (pos * 1.6f + 0.4f), 0f),
-            ),
-            alpha = 0.6f,
-        )
-    }
-    Column(
-        modifier = Modifier
-            .fillMaxSize()
-            .padding(horizontal = 16.dp),
-        verticalArrangement = Arrangement.spacedBy(10.dp),
-    ) {
-        // 顶部提示:小进度环 + 文案
-        Row(verticalAlignment = Alignment.CenterVertically) {
-            CircularProgressIndicator(
-                modifier = Modifier.size(18.dp),
-                strokeWidth = 2.dp,
-                color = scheme.primary,
-            )
-            Spacer(modifier = Modifier.width(10.dp))
-            Text(
-                "正在加载应用列表…",
-                style = MaterialTheme.typography.bodySmall,
-                color = scheme.onSurfaceVariant,
-            )
-        }
-        // 6 张骨架卡片:圆形图标占位 + 两行文字条占位
-        repeat(6) {
-            Row(
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .height(64.dp)
-                    .clip(MaterialTheme.shapes.large)
-                    .background(base, shape = MaterialTheme.shapes.large)
-                    .shimmer()
-                    .padding(horizontal = 14.dp),
-                verticalAlignment = Alignment.CenterVertically,
-            ) {
-                Box(
-                    modifier = Modifier
-                        .size(40.dp)
-                        .background(base, shape = RoundedCornerShape(14.dp)),
-                )
-                Spacer(modifier = Modifier.width(12.dp))
-                Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
-                    Box(
-                        modifier = Modifier
-                            .width(120.dp)
-                            .height(14.dp)
-                            .background(base, shape = RoundedCornerShape(7.dp)),
-                    )
-                    Box(
-                        modifier = Modifier
-                            .width(180.dp)
-                            .height(10.dp)
-                            .background(base, shape = RoundedCornerShape(5.dp)),
-                    )
-                }
-            }
-        }
-    }
-}
-
-/** 应用列表卡片:强调色圆图标容器 + 名称/包名 + 任务数状态点;点击进入任务页,长按弹信息抽屉 */
+/** 应用列表卡片:应用图标(禁网压暗+红色角标)+ 名称/包名 + 「联网/已禁网」胶囊开关;点击进入任务页,长按弹信息抽屉 */
 @Composable
 private fun AppListCard(
     app: AppRow,
@@ -1284,50 +1243,34 @@ private fun AppListCard(
     onLongClick: () -> Unit,
     onToggleNetwork: (Boolean) -> Unit,
 ) {
-    val accent = when {
-        blocked -> MaterialTheme.colorScheme.error
-        app.installed -> MaterialTheme.colorScheme.primary
-        else -> MaterialTheme.colorScheme.outlineVariant // 未安装:灰色调
-    }
     val context = LocalContext.current
     // 联网开关本地状态:实际下命令成功后才回调上层;失败回滚
     var netEnabled by remember(app.packageName) { mutableStateOf(!blocked) }
     LaunchedEffect(blocked) { netEnabled = !blocked }
     val scope = rememberCoroutineScope()
-    Card(
+    val scheme = MaterialTheme.colorScheme
+    // 卡片背景:禁网 = 左侧红色渐隐(无描边,纯色块区分)
+    val cardBrush = if (blocked) {
+        Brush.horizontalGradient(
+            listOf(scheme.error.copy(alpha = 0.16f), scheme.error.copy(alpha = 0.04f), scheme.surfaceVariant.copy(alpha = 0.3f))
+        )
+    } else {
+        Brush.horizontalGradient(listOf(scheme.surfaceVariant.copy(alpha = 0.38f), scheme.surfaceVariant.copy(alpha = 0.25f)))
+    }
+    Column(
         modifier = Modifier
             .fillMaxWidth()
-            // 先裁剪再挂点击:水波纹/长按反馈按卡片圆角绘制,而非矩形
             .clip(MaterialTheme.shapes.large)
+            .background(cardBrush)
             .combinedClickable(
                 onClick = onClick,
                 onLongClick = onLongClick,
             )
-            // 禁网态:错误色描边,与正常卡区分
-            .then(
-                if (blocked) Modifier.border(
-                    width = 1.dp,
-                    color = MaterialTheme.colorScheme.error.copy(alpha = 0.55f),
-                    shape = MaterialTheme.shapes.large,
-                ) else Modifier,
-            ),
-        colors = CardDefaults.cardColors(
-            containerColor = when {
-                blocked -> MaterialTheme.colorScheme.errorContainer.copy(alpha = 0.3f)
-                app.taskCount > 0 -> MaterialTheme.colorScheme.primaryContainer.copy(alpha = 0.35f)
-                else -> MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.45f)
-            },
-        ),
-        shape = MaterialTheme.shapes.large,
+            .padding(horizontal = 12.dp, vertical = 10.dp),
     ) {
-        Row(
-            modifier = Modifier
-                .fillMaxWidth()
-                .padding(14.dp),
-            verticalAlignment = Alignment.CenterVertically,
-        ) {
-            // 应用图标:加载失败时用默认图标占位;禁网时叠加断开图标角标
-            Box(contentAlignment = Alignment.Center) {
+        Row(verticalAlignment = Alignment.CenterVertically) {
+            // 应用图标:40dp 圆角,禁网时压暗 + 右下角红色断开角标
+            Box {
                 if (icon != null) {
                     Image(
                         bitmap = icon,
@@ -1335,55 +1278,82 @@ private fun AppListCard(
                         modifier = Modifier
                             .size(40.dp)
                             .clip(MaterialTheme.shapes.medium)
-                            // 禁网态:图标压暗,直观表示应用已离线
-                            .then(if (blocked) Modifier.alpha(0.55f) else Modifier),
+                            .then(if (blocked) Modifier.alpha(0.5f) else Modifier),
                     )
                 } else {
-                    AccentIcon(
-                        imageVector = Icons.Filled.Apps,
-                        accent = MaterialTheme.colorScheme.surfaceVariant,
-                        size = 40.dp,
-                        iconSize = 22.dp,
-                        tint = MaterialTheme.colorScheme.onSurfaceVariant,
-                    )
+                    Box(
+                        modifier = Modifier
+                            .size(40.dp)
+                            .clip(MaterialTheme.shapes.medium)
+                            .background(scheme.surfaceVariant.copy(alpha = 0.6f)),
+                        contentAlignment = Alignment.Center,
+                    ) {
+                        Icon(
+                            imageVector = Icons.Filled.Apps,
+                            contentDescription = null,
+                            tint = scheme.onSurfaceVariant,
+                            modifier = Modifier.size(22.dp).then(if (blocked) Modifier.alpha(0.5f) else Modifier),
+                        )
+                    }
                 }
                 if (blocked) {
                     Icon(
                         imageVector = Icons.Filled.WifiOff,
                         contentDescription = "已禁网",
-                        tint = MaterialTheme.colorScheme.onSurface,
+                        tint = scheme.onError,
                         modifier = Modifier
-                            .size(16.dp)
-                            .background(
-                                color = MaterialTheme.colorScheme.error,
-                                shape = CircleShape,
-                            )
-                            .padding(2.dp)
+                            .size(18.dp)
+                            .clip(CircleShape)
+                            .background(scheme.error)
+                            .padding(1.dp)
                             .clip(CircleShape)
                             .align(Alignment.BottomEnd),
                     )
                 }
             }
             Spacer(modifier = Modifier.width(12.dp))
-            Column(modifier = Modifier.weight(1f)) {
+            // 名称 + 包名/规则数
+            Column(modifier = Modifier.weight(1f).padding(end = 10.dp)) {
                 Text(
                     text = app.label,
                     style = MaterialTheme.typography.titleSmall,
                     fontWeight = FontWeight.SemiBold,
-                    // 未安装应用整卡置灰:文字/包名降为 outline 色
-                    color = if (app.installed) MaterialTheme.colorScheme.onSurface else MaterialTheme.colorScheme.outline,
+                    color = if (app.installed) scheme.onSurface else scheme.outline,
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis,
                 )
-                Text(
-                    // 副标题:包名 + 该应用的规则组数量(有规则时前置)
-                    text = if (app.taskCount > 0) "${app.taskCount} 条规则 · ${app.packageName}" else app.packageName,
-                    style = MaterialTheme.typography.bodySmall,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = if (app.installed) 1f else 0.55f),
-                )
+                Spacer(modifier = Modifier.height(2.dp))
+                Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(5.dp)) {
+                    if (app.taskCount > 0) {
+                        Icon(
+                            imageVector = Icons.AutoMirrored.Filled.Rule,
+                            contentDescription = null,
+                            tint = if (blocked) scheme.error else scheme.primary,
+                            modifier = Modifier.size(12.dp),
+                        )
+                        Text(
+                            text = "${app.taskCount} 条规则",
+                            style = MaterialTheme.typography.labelSmall,
+                            color = if (app.installed) scheme.onSurfaceVariant else scheme.outline,
+                        )
+                    }
+                    Text(
+                        text = app.packageName,
+                        style = MaterialTheme.typography.labelSmall,
+                        color = if (app.installed) scheme.onSurfaceVariant.copy(alpha = 0.8f)
+                                else scheme.outline.copy(alpha = 0.7f),
+                        maxLines = 1,
+                        overflow = TextOverflow.Ellipsis,
+                        modifier = Modifier.weight(1f, fill = false),
+                    )
+                }
             }
-            Spacer(modifier = Modifier.width(12.dp))
-            // 联网开关:点击直接禁用/启用该应用联网(与长按抽屉同一命令通道)
-            IconButton(
-                onClick = {
+            // 联网开关:图标+文字胶囊,联网=强调色浅底,禁网=错误色实底(无描边)
+            Surface(
+                color = if (netEnabled) scheme.primaryContainer.copy(alpha = 0.55f) else scheme.error,
+                contentColor = if (netEnabled) scheme.onPrimaryContainer else scheme.onError,
+                shape = CircleShape,
+                modifier = Modifier.clickable {
                     // netEnabled = 期望的联网态;setNetworkBlocked/onToggleNetwork 传的是禁网态(取反)
                     val targetEnabled = !netEnabled
                     val targetBlocked = !targetEnabled
@@ -1392,8 +1362,13 @@ private fun AppListCard(
                             netEnabled = targetEnabled
                             scope.launch {
                                 val err = withContext(Dispatchers.IO) {
-                                    setNetworkBlocked(app.packageName, targetBlocked)
+                                    setNetworkBlocked(app.packageName, targetBlocked, context.applicationContext)
                                 }
+                                // 禁网诊断日志:开关命令结果(成功/失败 + 原因)
+                                LogStore.log(
+                                    if (err == null) "⇅ 禁网设置:${app.packageName} → ${if (targetBlocked) "禁用" else "允许"}"
+                                    else "⇅ 禁网设置失败:${app.packageName} → $err",
+                                )
                                 if (err == null) {
                                     onToggleNetwork(targetBlocked)
                                 } else {
@@ -1403,23 +1378,29 @@ private fun AppListCard(
                             }
                         },
                         onFail = { msg ->
+                            LogStore.log("⇅ 禁网设置失败:${app.packageName} → $msg")
                             Toast.makeText(context, msg, Toast.LENGTH_SHORT).show()
                         },
                     )
                 },
-                modifier = Modifier.size(34.dp),
             ) {
-                Icon(
-                    imageVector = if (netEnabled) Icons.Filled.Wifi else Icons.Filled.WifiOff,
-                    contentDescription = if (netEnabled) "禁用网络" else "允许联网",
-                    tint = if (netEnabled) MaterialTheme.colorScheme.onSurfaceVariant
-                           else MaterialTheme.colorScheme.error,
-                    modifier = Modifier.size(20.dp),
-                )
+                Row(
+                    modifier = Modifier.padding(horizontal = 12.dp, vertical = 7.dp),
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.spacedBy(5.dp),
+                ) {
+                    Icon(
+                        imageVector = if (netEnabled) Icons.Filled.Wifi else Icons.Filled.WifiOff,
+                        contentDescription = if (netEnabled) "禁用网络" else "已禁网",
+                        modifier = Modifier.size(15.dp),
+                    )
+                    Text(
+                        text = if (netEnabled) "联网" else "已禁网",
+                        style = MaterialTheme.typography.labelMedium,
+                        fontWeight = FontWeight.SemiBold,
+                    )
+                }
             }
-            Spacer(modifier = Modifier.width(6.dp))
-            // 任务数状态点:有任务=强调色,无任务=灰
-            StatusDot(active = app.taskCount > 0, accent = accent, size = 9.dp)
         }
     }
 }
@@ -1446,6 +1427,31 @@ private fun AppInfoSheet(
     // 功能开关状态:初始值来自上层清单,实际下命令成功后才回调上层同步
     var disableNetwork by remember(pkg) { mutableStateOf(initialBlocked) }
     val scope = rememberCoroutineScope()
+    // 统一下发禁网命令:成功才回传上层,失败回滚 + Toast
+    fun toggleBlocked(target: Boolean) {
+        ensureShizukuForNetwork(
+            onReady = {
+                disableNetwork = target
+                scope.launch {
+                    val err = withContext(Dispatchers.IO) { setNetworkBlocked(pkg, target, context.applicationContext) }
+                    LogStore.log(
+                        if (err == null) "⇅ 禁网设置:$pkg → ${if (target) "禁用" else "允许"}"
+                        else "⇅ 禁网设置失败:$pkg → $err",
+                    )
+                    if (err == null) {
+                        onBlockedChange(target)
+                    } else {
+                        disableNetwork = !target
+                        Toast.makeText(context, "禁网设置失败: $err", Toast.LENGTH_SHORT).show()
+                    }
+                }
+            },
+            onFail = { msg ->
+                LogStore.log("⇅ 禁网设置失败:$pkg → $msg")
+                Toast.makeText(context, msg, Toast.LENGTH_SHORT).show()
+            },
+        )
+    }
 
     ModalBottomSheet(onDismissRequest = onDismiss) {
         Column(
@@ -1486,38 +1492,79 @@ private fun AppInfoSheet(
 
             HorizontalDivider()
 
-            // 功能开关区
-            Text(
-                text = "功能控制",
-                style = MaterialTheme.typography.titleSmall,
-                fontWeight = FontWeight.SemiBold,
-                modifier = Modifier.padding(top = 8.dp, start = 4.dp),
-            )
-            AppToggleRow(
-                title = "禁用网络",
-                desc = "彻底阻断该应用联网(前台+后台,connectivity chain-3,无需 root/VPN,需 Shizuku);重启后自动恢复",
-                checked = disableNetwork,
-                onChange = { target ->
-                    ensureShizukuForNetwork(
-                        onReady = {
-                            disableNetwork = target
-                            scope.launch {
-                                val err = withContext(Dispatchers.IO) { setNetworkBlocked(pkg, target) }
-                                if (err == null) {
-                                    // 实际生效后才通知上层落盘并同步列表角标;失败回滚 UI
-                                    onBlockedChange(target)
-                                } else {
-                                    disableNetwork = !target
-                                    Toast.makeText(context, "禁网设置失败: $err", Toast.LENGTH_SHORT).show()
-                                }
+            // 禁网状态卡:错误色容器 + 状态图标 + 说明 + 开关,整卡点按切换
+            Surface(
+                color = if (disableNetwork) MaterialTheme.colorScheme.errorContainer.copy(alpha = 0.6f)
+                        else MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.45f),
+                shape = MaterialTheme.shapes.large,
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .padding(top = 8.dp)
+                    .clip(MaterialTheme.shapes.large)
+                    .combinedClickable(onClick = { toggleBlocked(!disableNetwork) }),
+            ) {
+                Row(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .padding(14.dp),
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.spacedBy(12.dp),
+                ) {
+                    Surface(
+                        color = if (disableNetwork) MaterialTheme.colorScheme.error
+                                else MaterialTheme.colorScheme.surfaceVariant,
+                        contentColor = if (disableNetwork) MaterialTheme.colorScheme.onError
+                                else MaterialTheme.colorScheme.onSurfaceVariant,
+                        shape = CircleShape,
+                        modifier = Modifier.size(36.dp),
+                    ) {
+                        Box(contentAlignment = Alignment.Center) {
+                            Icon(
+                                imageVector = if (disableNetwork) Icons.Filled.WifiOff else Icons.Filled.Wifi,
+                                contentDescription = "网络状态",
+                                modifier = Modifier.size(18.dp),
+                            )
+                        }
+                    }
+                    Column(modifier = Modifier.weight(1f)) {
+                        Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+                            Text(
+                                text = "网络状态",
+                                style = MaterialTheme.typography.titleSmall,
+                                fontWeight = FontWeight.SemiBold,
+                            )
+                            Surface(
+                                color = if (disableNetwork) MaterialTheme.colorScheme.error
+                                        else MaterialTheme.colorScheme.primaryContainer,
+                                contentColor = if (disableNetwork) MaterialTheme.colorScheme.onError
+                                        else MaterialTheme.colorScheme.onPrimaryContainer,
+                                shape = CircleShape,
+                            ) {
+                                Text(
+                                    text = if (disableNetwork) "已禁网" else "联网中",
+                                    style = MaterialTheme.typography.labelSmall,
+                                    fontWeight = FontWeight.Medium,
+                                    modifier = Modifier.padding(horizontal = 8.dp, vertical = 2.dp),
+                                )
                             }
-                        },
-                        onFail = { msg ->
-                            Toast.makeText(context, msg, Toast.LENGTH_SHORT).show()
-                        },
+                        }
+                        Text(
+                            text = "chain-3 平台防火墙,前台+后台全拦截,需 Shizuku",
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        )
+                    }
+                    Switch(
+                        checked = disableNetwork,
+                        onCheckedChange = { target -> toggleBlocked(target) },
+                        colors = SwitchDefaults.colors(
+                            checkedTrackColor = MaterialTheme.colorScheme.error,
+                            checkedThumbColor = MaterialTheme.colorScheme.onError,
+                            uncheckedThumbColor = MaterialTheme.colorScheme.surface,
+                        ),
                     )
-                },
-            )
+                }
+            }
         }
     }
 }
@@ -1525,7 +1572,7 @@ private fun AppInfoSheet(
 /**
  * 彻底断网:connectivity chain-3(Android 11+ 平台防火墙,shell 身份可执行)。
  * 按 appId 在系统层拦截应用联网,前台后台都拦;无需 root、无 VPN 隧道。
- * 系统重启后规则清空,由 NetPolicyStore 持久化清单 + restoreNetPolicies 恢复。
+ * 真实状态以系统为准,由界面经 get-package-networking-enabled 实时查询。
  */
 
 /**
@@ -1577,28 +1624,106 @@ private fun ensureShizukuForNetwork(
 private fun enableChain3(): Boolean =
     ShizukuShell.exec(arrayOf("cmd", "connectivity", "set-chain3-enabled", "true")).ok
 
-/** 开关包名的联网;返回 null = 成功,否则为失败原因 */
-private fun setNetworkBlocked(pkg: String, blocked: Boolean): String? {
+/** 开关包名的联网;返回 null = 成功,否则为失败原因。
+ * 经 Shizuku 逐条 exec 偶发 exit=255/空 stderr(binder 抖动),故:
+ * 合并为单条 shell 命令减少往返;失败重试;最终以 get 回读确认为准。
+ * 全局互斥锁:连续对多个应用禁网时各处并发进入,多个 IRemoteProcess 同时跑会互相挤掉
+ * (Shizuku binder 单通道,并发 transact 触发 DeadObject/255),在此串行化。 */
+private val netOpMutex = kotlinx.coroutines.sync.Mutex()
+
+private suspend fun setNetworkBlocked(pkg: String, blocked: Boolean, appContext: android.content.Context): String? =
+    netOpMutex.withLock {
+        setNetworkBlockedLocked(pkg, blocked, appContext)
+    }
+
+private fun setNetworkBlockedLocked(pkg: String, blocked: Boolean, appContext: android.content.Context): String? {
     if (!ShizukuShell.isReady()) return "Shizuku 未就绪或未授权"
-    if (!enableChain3()) return "chain-3 防火墙启用失败"
-    val r = ShizukuShell.exec(
-        arrayOf(
-            "cmd", "connectivity", "set-package-networking-enabled",
-            if (blocked) "false" else "true", pkg,
+    // 系统应用(appId 1000)平台拒绝设置(ShizuWall 同款预检),直接报错不重试
+    val appId = runCatching {
+        appContext.packageManager.getApplicationInfo(pkg, 0).uid % 100000
+    }.getOrNull() ?: 0
+    if (appId == 1000) return "系统应用(appId 1000)不支持禁网"
+    val target = if (blocked) "false" else "true"
+    var lastErr = ""
+    repeat(3) { attempt ->
+        if (attempt > 0) Thread.sleep(400L * attempt)  // 退避重试;调用方在 IO 线程,可阻塞
+        val r = ShizukuShell.exec(
+            arrayOf(
+                "sh", "-c",
+                "cmd connectivity set-chain3-enabled true; cmd connectivity set-package-networking-enabled $target $pkg",
+            ),
         )
-    )
-    if (!r.ok) return "命令失败: ${r.stderr.ifBlank { "exit=${r.exitCode}" }}"
-    return null
+        if (r.ok) {
+            // 回读确认:系统侧接受命令即认为成功
+            val confirmed = queryNetworkBlocked(pkg)
+            if (confirmed == blocked) return null
+            // ShizuWall 同款:suidownermap 缺项视为已生效(应用从未联网过时系统无条目)
+            val errText = (r.stderr + r.stdout).lowercase()
+            if ("suidownermap does not have entry for uid" in errText) return null
+            lastErr = "回读不符(实际${if (confirmed == true) "禁网" else "联网/未知"})"
+        } else {
+            val errText = (r.stderr + r.stdout).lowercase()
+            if ("suidownermap does not have entry for uid" in errText) return null
+            if ("can't set package firewall rule for system app" in errText) return "系统应用不支持禁网"
+            lastErr = r.stderr.ifBlank { "exit=${r.exitCode}" }
+        }
+    }
+    return "命令失败: $lastErr"
 }
 
 /**
- * 恢复持久化的禁网清单:逐包重下 chain-3 规则(幂等,重复设置同值无副作用)。
- * 进入应用界面时于 IO 线程调用;Shizuku 未就绪时静默跳过,下次勾选/启动再恢复。
+ * 查询包名禁网状态:cmd connectivity get-package-networking-enabled
+ * 设备实际输出为「<pkg>:allow」或「<pkg>:deny」(空输出/异常 = 未知态,返回 null)。
  */
-private fun restoreNetPolicies(context: android.content.Context) {
-    val blocked = NetPolicyStore.loadBlocked(context) ?: return
-    if (blocked.isEmpty()) return
-    blocked.forEach { pkg -> setNetworkBlocked(pkg, blocked = true) }
+private fun queryNetworkBlocked(pkg: String): Boolean? {
+    if (!ShizukuShell.isReady()) return null
+    val r = runCatching {
+        ShizukuShell.exec(arrayOf("cmd", "connectivity", "get-package-networking-enabled", pkg))
+    }.getOrNull() ?: return null
+    if (!r.ok) return null
+    val out = r.stdout.trim().lowercase()
+    return when {
+        out.endsWith(":deny") -> true
+        out.endsWith(":allow") -> false
+        else -> null
+    }
+}
+
+/**
+ * 批量查询禁网状态(ShizuWall 同款批处理思路):单条 shell for 循环一次 exec
+ * 查完所有包,避免逐包开 IRemoteProcess 把 Shizuku binder 打挂(DeadObjectException)。
+ * 返回 pkg → 禁网态;输出缺失/解析失败的包不出现在结果里(调用方保留旧值)。
+ */
+private fun queryNetworkBlockedBatch(pkgs: List<String>): Map<String, Boolean> {
+    if (pkgs.isEmpty() || !ShizukuShell.isReady()) return emptyMap()
+    val results = mutableMapOf<String, Boolean>()
+    // 单条命令长度预算(照抄 ShizuWall MAX_BATCH_COMMAND_LENGTH 4096)
+    val current = StringBuilder()
+    fun flush() {
+        if (current.isEmpty()) return
+        val script = StringBuilder("true; for p in").append(current)
+            .append("; do cmd connectivity get-package-networking-enabled \$p; done")
+        val r = runCatching {
+            ShizukuShell.exec(arrayOf("sh", "-c", script.toString()))
+        }.getOrNull() ?: return
+        // 单包 NameNotFound 只影响该行输出,for 循环继续;末尾 true 保证整体 exit=0
+        r.stdout.lineSequence().forEach { line ->
+            val t = line.trim().lowercase()
+            val idx = t.lastIndexOf(':')
+            if (idx <= 0) return@forEach
+            when (t.substring(idx + 1)) {
+                "deny" -> results[t.substring(0, idx)] = true
+                "allow" -> results[t.substring(0, idx)] = false
+            }
+        }
+        current.clear()
+    }
+    pkgs.forEach { pkg ->
+        if (current.length + pkg.length + 1 > 3900) flush()
+        current.append(' ').append(pkg)
+    }
+    flush()
+    return results
 }
 
 /** 抽屉里的单行功能开关:强调色圆图标 + 标题/说明 + 开关,整行可点,开启时染上强调色 */
@@ -2000,9 +2125,15 @@ private fun MergedRuleCard(
                             )
                             Text(
                                 text = buildString {
-                                    if (task.activityIds.isNotEmpty()) append("Activity≈${task.activityIds.first()} · ")
-                                    val trigger = task.rules.firstOrNull()?.matches?.firstOrNull()
-                                    append(if (trigger != null) "触发:${trigger.expr}" else "页面就绪即触发")
+                                    // 场景流显示步数,单步显示触发选择器
+                                    val steps = task.steps
+                                    if (steps?.isNotEmpty() == true) {
+                                        append("${steps.size} 步场景流")
+                                    } else {
+                                        if (task.activityIds.isNotEmpty()) append("Activity≈${task.activityIds.first()} · ")
+                                        val trigger = task.rules.firstOrNull()?.matches?.firstOrNull()
+                                        append(if (trigger != null) "触发:${trigger.expr}" else "页面就绪即触发")
+                                    }
                                 },
                                 style = MaterialTheme.typography.bodySmall,
                                 color = MaterialTheme.colorScheme.onSurfaceVariant,
@@ -2272,7 +2403,21 @@ private fun TaskListPage(
                                     }
                                     Spacer(modifier = Modifier.width(6.dp))
                                 }
-                                // 来源角标:远程订阅导入 / 本地自定义
+                                // 来源角标:远程订阅导入 / 本地自定义;场景流显示「N 步」角标
+                                if (task.steps?.isNotEmpty() == true) {
+                                    Surface(
+                                        shape = MaterialTheme.shapes.small,
+                                        color = MaterialTheme.colorScheme.primary.copy(alpha = 0.15f),
+                                    ) {
+                                        Text(
+                                            text = "${task.steps.size}步",
+                                            style = MaterialTheme.typography.labelSmall,
+                                            color = MaterialTheme.colorScheme.primary,
+                                            modifier = Modifier.padding(horizontal = 5.dp, vertical = 1.dp),
+                                        )
+                                    }
+                                    Spacer(modifier = Modifier.width(6.dp))
+                                }
                                 SourceBadge(isRemote = task.isFromSubscription)
                             }
                             Text(
@@ -2556,6 +2701,24 @@ private fun RuleEditorPage(
     var actionMax by remember {
         mutableStateOf((rule0?.actionMaximum?.takeIf { it > 0 } ?: 1L).toString())
     }
+    // 步骤模式:开启后本组为多步骤场景流(steps),单步表单收起
+    var stepMode by remember { mutableStateOf(existing?.steps?.isNotEmpty() == true) }
+    // 步骤编辑草稿:文本态字段,保存时解析为 GkdTask.Step
+    var stepDrafts: List<StepDraft> by remember {
+        mutableStateOf<List<StepDraft>>(
+            existing?.steps?.map { s ->
+                StepDraft(
+                    name = s.name,
+                    matchesText = (s.matches + s.anyMatches).joinToString("\n") { it.expr },
+                    actionKind = s.action?.gkd ?: "click",
+                    waitTimeoutText = s.waitTimeout.toString(),
+                    settleTimeText = s.settleTime.toString(),
+                    skipOnTimeout = s.onTimeout == GkdTask.Step.TimeoutPolicy.Continue,
+                )
+            } ?: emptyList(),
+        )
+    }
+    var editingStepIdx by remember { mutableStateOf<Int?>(null) }
 
     Column(modifier = modifier.fillMaxSize()) {
         // 顶栏:强调色返回圆钮 + 标题 + 保存
@@ -2590,6 +2753,47 @@ private fun RuleEditorPage(
             }
             TextButton(
                 onClick = {
+                    // 步骤模式:解析各步选择器为 GkdTask.Step,rules 留空由场景流驱动
+                    if (stepMode) {
+                        val parsed = mutableListOf<GkdTask.Step>()
+                        for ((idx, d) in stepDrafts.withIndex()) {
+                            val sels = d.matchesText.lines()
+                                .map { it.trim() }
+                                .filter { it.isNotEmpty() && !it.startsWith("//") }
+                                .map { expr ->
+                                    runCatching { GkdSelector.parse(expr) }.getOrElse {
+                                        Toast.makeText(context, "步骤${idx + 1} 选择器语法错误: $expr", Toast.LENGTH_LONG).show()
+                                        return@TextButton
+                                    }
+                                }
+                            parsed += GkdTask.Step(
+                                name = d.name.trim(),
+                                matches = sels,
+                                action = Action.entries.firstOrNull { it.gkd == d.actionKind } ?: Action.Click,
+                                waitTimeout = d.waitTimeoutText.toLongOrNull() ?: 0L,
+                                settleTime = d.settleTimeText.toLongOrNull() ?: 0L,
+                                onTimeout = if (d.skipOnTimeout) GkdTask.Step.TimeoutPolicy.Continue
+                                else GkdTask.Step.TimeoutPolicy.Abort,
+                            )
+                        }
+                        if (parsed.isEmpty()) {
+                            Toast.makeText(context, "请先添加至少一个步骤", Toast.LENGTH_SHORT).show()
+                            return@TextButton
+                        }
+                        val saved = GkdTask(
+                            id = existing?.id ?: "task_${System.currentTimeMillis()}",
+                            name = name.trim().ifEmpty { "场景流" },
+                            packageName = pkg,
+                            activityIds = activityIdsText.lines()
+                                .map { it.trim() }.filter { it.isNotEmpty() },
+                            enabled = existing?.enabled ?: false,
+                            rules = emptyList(),
+                            steps = parsed,
+                        )
+                        onSave(saved)
+                        Toast.makeText(context, "场景流已保存(${parsed.size} 步)", Toast.LENGTH_SHORT).show()
+                        return@TextButton
+                    }
                     // 解析 GKD 选择器;语法错误不允许保存(多行 = 多条选择器)
                     var parseFailed = false
                     fun parseList(text: String, field: String): List<GkdSelector> {
@@ -2745,6 +2949,22 @@ private fun RuleEditorPage(
                 singleLine = true,
                 modifier = Modifier.fillMaxWidth(),
             )
+            // 模式切换:单步规则 / 多步骤场景流
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.spacedBy(8.dp),
+            ) {
+                FilterChip(
+                    selected = !stepMode,
+                    onClick = { stepMode = false },
+                    label = { Text("单步规则") },
+                )
+                FilterChip(
+                    selected = stepMode,
+                    onClick = { stepMode = true },
+                    label = { Text("多步骤场景流") },
+                )
+            }
             OutlinedTextField(
                 value = activityIdsText,
                 onValueChange = { activityIdsText = it },
@@ -2752,6 +2972,8 @@ private fun RuleEditorPage(
                 minLines = 1, maxLines = 4,
                 modifier = Modifier.fillMaxWidth(),
             )
+            // 单步表单(步骤模式下收起,由场景流编辑区替代)
+            if (!stepMode) {
             SelectorExprField(
                 value = matchesText,
                 onChange = { matchesText = it },
@@ -2944,6 +3166,185 @@ private fun RuleEditorPage(
                 style = MaterialTheme.typography.bodySmall,
                 color = MaterialTheme.colorScheme.onSurfaceVariant,
             )
+            } else {
+                // ---- 多步骤场景流编辑区 ----
+                Text(
+                    text = "场景流步骤(按序执行,每步等待目标出现后执行动作)",
+                    style = MaterialTheme.typography.titleSmall,
+                    fontWeight = FontWeight.SemiBold,
+                )
+                fun updateDraft(i: Int, transform: (StepDraft) -> StepDraft) {
+                    stepDrafts = stepDrafts.mapIndexed { j, d -> if (j == i) transform(d) else d }
+                }
+                stepDrafts.forEachIndexed { idx, d ->
+                    val expanded = editingStepIdx == idx
+                    Card(
+                        modifier = Modifier.fillMaxWidth(),
+                        colors = CardDefaults.cardColors(
+                            containerColor = if (expanded) MaterialTheme.colorScheme.primaryContainer.copy(alpha = 0.25f)
+                            else MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.45f),
+                        ),
+                        shape = MaterialTheme.shapes.medium,
+                    ) {
+                        Column {
+                            // 折叠行:序号 + 名称 + 动作 + 等待时长,点按展开/收起
+                            Row(
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .combinedClickable(
+                                        onClick = { editingStepIdx = if (expanded) null else idx },
+                                        onLongClick = {},
+                                    )
+                                    .padding(horizontal = 12.dp, vertical = 10.dp),
+                                verticalAlignment = Alignment.CenterVertically,
+                            ) {
+                                Text(
+                                    text = "${idx + 1}",
+                                    style = MaterialTheme.typography.labelSmall,
+                                    color = MaterialTheme.colorScheme.primary,
+                                    fontFamily = androidx.compose.ui.text.font.FontFamily.Monospace,
+                                    modifier = Modifier
+                                        .background(
+                                            MaterialTheme.colorScheme.primary.copy(alpha = 0.12f),
+                                            MaterialTheme.shapes.small,
+                                        )
+                                        .padding(horizontal = 6.dp, vertical = 2.dp),
+                                )
+                                Spacer(modifier = Modifier.width(10.dp))
+                                Text(
+                                    text = d.name.ifEmpty { "步骤${idx + 1}" },
+                                    style = MaterialTheme.typography.titleSmall,
+                                    fontWeight = FontWeight.SemiBold,
+                                    modifier = Modifier.weight(1f),
+                                )
+                                Text(
+                                    text = buildString {
+                                        append(GKD_ACTION_LABELS[d.actionKind] ?: d.actionKind)
+                                        val wt = d.waitTimeoutText.toLongOrNull() ?: 0L
+                                        if (wt > 0) append(" · 等${wt / 1000}s")
+                                    },
+                                    style = MaterialTheme.typography.bodySmall,
+                                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                )
+                                Icon(
+                                    imageVector = if (expanded) Icons.Filled.KeyboardArrowUp else Icons.Filled.KeyboardArrowDown,
+                                    contentDescription = null,
+                                    tint = MaterialTheme.colorScheme.onSurfaceVariant,
+                                )
+                            }
+                            // 展开编辑区:名称 / 选择器 / 动作 / 等待参数
+                            if (expanded) {
+                                Column(
+                                    modifier = Modifier.padding(horizontal = 12.dp, vertical = 4.dp),
+                                    verticalArrangement = Arrangement.spacedBy(10.dp),
+                                ) {
+                                    OutlinedTextField(
+                                        value = d.name,
+                                        onValueChange = { v -> updateDraft(idx) { it.copy(name = v) } },
+                                        label = { Text("步骤名(可选)") },
+                                        singleLine = true,
+                                        modifier = Modifier.fillMaxWidth(),
+                                    )
+                                    SelectorExprField(
+                                        value = d.matchesText,
+                                        onChange = { v -> updateDraft(idx) { it.copy(matchesText = v) } },
+                                        label = "本步选择器(每行一条,全部命中;留空 = 无条件步)",
+                                        hint = "例: [text*=\"同意\"][clickable=true]",
+                                        minLines = 2,
+                                    )
+                                    // 动作选择
+                                    Row(
+                                        modifier = Modifier.horizontalScroll(rememberScrollState()),
+                                        horizontalArrangement = Arrangement.spacedBy(8.dp),
+                                    ) {
+                                        Action.entries.forEach { a ->
+                                            FilterChip(
+                                                selected = d.actionKind == a.gkd,
+                                                onClick = { updateDraft(idx) { it.copy(actionKind = a.gkd) } },
+                                                label = { Text(GKD_ACTION_LABELS[a.gkd] ?: a.gkd) },
+                                            )
+                                        }
+                                    }
+                                    OutlinedTextField(
+                                        value = d.waitTimeoutText,
+                                        onValueChange = { v -> updateDraft(idx) { it.copy(waitTimeoutText = v.filter { c -> c.isDigit() }) } },
+                                        label = { Text("等待目标出现超时 ms(0 = 只查当帧)") },
+                                        singleLine = true,
+                                        modifier = Modifier.fillMaxWidth(),
+                                    )
+                                    OutlinedTextField(
+                                        value = d.settleTimeText,
+                                        onValueChange = { v -> updateDraft(idx) { it.copy(settleTimeText = v.filter { c -> c.isDigit() }) } },
+                                        label = { Text("目标出现后稳定等待 ms(防动画中点空)") },
+                                        singleLine = true,
+                                        modifier = Modifier.fillMaxWidth(),
+                                    )
+                                    Row(verticalAlignment = Alignment.CenterVertically) {
+                                        Switch(
+                                            checked = d.skipOnTimeout,
+                                            onCheckedChange = { v -> updateDraft(idx) { it.copy(skipOnTimeout = v) } },
+                                        )
+                                        Spacer(Modifier.width(8.dp))
+                                        Text("超时跳过(关闭 = 超时终止整个流)", style = MaterialTheme.typography.bodySmall)
+                                    }
+                                    // 排序 / 删除
+                                    Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                                        TextButton(
+                                            onClick = {
+                                                if (idx > 0) {
+                                                    stepDrafts = stepDrafts.toMutableList().apply { add(idx - 1, removeAt(idx)) }
+                                                    editingStepIdx = idx - 1
+                                                }
+                                            },
+                                            enabled = idx > 0,
+                                        ) { Text("上移") }
+                                        TextButton(
+                                            onClick = {
+                                                if (idx < stepDrafts.size - 1) {
+                                                    stepDrafts = stepDrafts.toMutableList().apply { add(idx + 1, removeAt(idx)) }
+                                                    editingStepIdx = idx + 1
+                                                }
+                                            },
+                                            enabled = idx < stepDrafts.size - 1,
+                                        ) { Text("下移") }
+                                        TextButton(
+                                            onClick = {
+                                                stepDrafts = stepDrafts.filterIndexed { j, _ -> j != idx }
+                                                editingStepIdx = null
+                                            },
+                                        ) { Text("删除", color = MaterialTheme.colorScheme.error) }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+                // 添加步骤
+                Surface(
+                    onClick = {
+                        stepDrafts = stepDrafts + StepDraft("", "", "click", "3000", "0", false)
+                        editingStepIdx = stepDrafts.size - 1
+                    },
+                    modifier = Modifier.fillMaxWidth().height(48.dp),
+                    shape = MaterialTheme.shapes.large,
+                    color = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.45f),
+                ) {
+                    Row(
+                        modifier = Modifier.fillMaxSize(),
+                        horizontalArrangement = Arrangement.Center,
+                        verticalAlignment = Alignment.CenterVertically,
+                    ) {
+                        Icon(Icons.Filled.Add, contentDescription = null, modifier = Modifier.size(18.dp))
+                        Spacer(modifier = Modifier.width(6.dp))
+                        Text("添加步骤", style = MaterialTheme.typography.titleSmall, fontWeight = FontWeight.SemiBold)
+                    }
+                }
+                Text(
+                    text = "场景流由第一步的选择器触发;组内 rules 不参与独立调度。",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
+            }
         }
     }
 }
@@ -3213,36 +3614,15 @@ private val ACTION_HINTS = mapOf(
 
 /** 顶部标题 */
 @Composable
-private fun TitleBar(serviceConnected: Boolean = false) {
+private fun TitleBar(serviceConnected: Boolean = false, servicePending: Boolean = false) {
     Row(
         verticalAlignment = Alignment.CenterVertically,
         modifier = Modifier.fillMaxWidth(),
     ) {
-        Column(modifier = Modifier.weight(1f)) {
-            Text(
-                text = "自动化助手",
-                style = MaterialTheme.typography.headlineLarge,
-                fontWeight = FontWeight.SemiBold,
-            )
-            Spacer(modifier = Modifier.height(4.dp))
-            Text(
-                text = if (serviceConnected) "服务运行中,任务可自动执行" else "无障碍自动化任务管理",
-                style = MaterialTheme.typography.bodyMedium,
-                color = MaterialTheme.colorScheme.onSurfaceVariant,
-            )
-        }
-        // 运行状态圆点:绿=服务已连接,灰=未连接
-        Box(
-            modifier = Modifier
-                .size(12.dp)
-                .background(
-                    if (serviceConnected) {
-                        MaterialTheme.colorScheme.primary
-                    } else {
-                        MaterialTheme.colorScheme.outlineVariant
-                    },
-                    shape = CircleShape,
-                ),
+        Text(
+            text = "自动化助手",
+            style = MaterialTheme.typography.headlineLarge,
+            fontWeight = FontWeight.SemiBold,
         )
     }
 }
@@ -3751,15 +4131,23 @@ private fun RulesDocBlock(block: DocBlock, onLink: (String) -> Unit = {}) {
     // 链接文本:点击命中 doc_link 注解区域时回调目标
     @Composable
     fun LinkText(text: androidx.compose.ui.text.AnnotatedString, style: androidx.compose.ui.text.TextStyle, modifier: Modifier) {
-        val layoutResult = remember { androidx.compose.runtime.mutableStateOf<androidx.compose.ui.text.TextLayoutResult?>(null) }
-        androidx.compose.foundation.text.ClickableText(
-            text = text,
-            style = style,
-            onTextLayout = { layoutResult.value = it },
-            onClick = { offset ->
-                text.getStringAnnotations("doc_link", offset, offset)
-                    .firstOrNull()?.let { onLink(it.item) }
+        // ClickableText 已弃用:改用 Text + linkAnnotation 拦截点击(doc_link 注解区域)
+        androidx.compose.foundation.text.BasicText(
+            text = androidx.compose.ui.text.buildAnnotatedString {
+                append(text)
+                text.getStringAnnotations("doc_link", 0, text.length).forEach { ann ->
+                    addLink(
+                        androidx.compose.ui.text.LinkAnnotation.Clickable(
+                            tag = "doc_link",
+                            styles = androidx.compose.ui.text.TextLinkStyles(
+                                style = androidx.compose.ui.text.SpanStyle(color = style.color),
+                            ),
+                        ) { onLink(ann.item) },
+                        ann.start, ann.end,
+                    )
+                }
             },
+            style = style,
             modifier = modifier,
         )
     }

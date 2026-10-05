@@ -32,6 +32,8 @@ data class GkdTask(
     val excludeActivityIds: List<String> = emptyList(),
     /** 组内规则;规则可为空列表(GKD 保留空组,如壳 App 提示组) */
     val rules: List<Rule> = emptyList(),
+    /** 本地扩展:多步骤编排。非空时组内规则不独立调度,由场景流按序驱动;不导出订阅 */
+    val steps: List<Step>? = null,
 
     // ---- RawCommonProps(组级默认,规则可覆盖;0/null = 用默认) ----
     val actionCd: Long = 1000L,
@@ -67,6 +69,40 @@ data class GkdTask(
         @SerialName("activity") Activity("activity"),
         @SerialName("match") Match("match"),
         @SerialName("app") App("app");
+    }
+
+    /**
+     * 多步骤编排的单个步骤(本地扩展,不导出 GKD 订阅):
+     * 按列表顺序执行,每步等待自己的目标出现后执行动作。
+     */
+    @Serializable
+    data class Step(
+        val name: String = "",
+        /** 该步目标选择器(命中后执行动作;空 = 无条件步,仅延时) */
+        val matches: List<GkdSelector> = emptyList(),
+        /** 任一命中即可 */
+        val anyMatches: List<GkdSelector> = emptyList(),
+        /** 存在一个命中则不执行此步 */
+        val excludeMatches: List<GkdSelector> = emptyList(),
+        /** 动作;null = click */
+        val action: Action? = null,
+        val actionRaw: String? = null,
+        val position: Position? = null,
+        val swipeArg: SwipeArg? = null,
+        /** 等待目标出现的超时;0 = 不等待(当帧没有则按 onTimeout 处理) */
+        val waitTimeout: Long = 0L,
+        /** 等待轮询间隔,默认 250ms */
+        val waitInterval: Long = 250L,
+        /** 目标出现后额外稳定时间,防动画未结束时点空 */
+        val settleTime: Long = 0L,
+        /** 超时未出现:continue = 跳过此步继续 / abort = 终止整个流 */
+        val onTimeout: TimeoutPolicy = TimeoutPolicy.Abort,
+    ) {
+        @Serializable
+        enum class TimeoutPolicy {
+            @SerialName("continue") Continue,
+            @SerialName("abort") Abort;
+        }
     }
 
     /**
@@ -179,7 +215,6 @@ data class GkdTask(
 
     // ---- 兼容便捷视图 ----
 
-    @Transient
     val actionsSummary: String by lazy {
         rules.joinToString("→") { r ->
             r.action?.let { a ->

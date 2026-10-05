@@ -24,6 +24,9 @@ class TaskRunner(private val service: DramaAccessibilityService) {
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.Main)
     private val jobs = HashMap<String, Job>()
 
+    /** 场景流(多步骤编排)在途任务:task.id → Job,流在途时同组不重复触发 */
+    private val sceneJobs = HashMap<String, Job>()
+
     /** 单条规则执行状态 */
     private class ExecState {
         var count = 0L            // actionMaximum 计数
@@ -53,7 +56,9 @@ class TaskRunner(private val service: DramaAccessibilityService) {
 
     private fun startForcedPolling() {
         pollJob?.cancel()
-        val hasForced = tasks.any { t -> t.enabled && (t.forcedTime > 0 || t.rules.any { it.forcedTime > 0 }) }
+        val hasForced = tasks.any { t ->
+            t.enabled && (t.forcedTime > 0 || t.rules.any { it.forcedTime > 0 } || (t.steps?.isNotEmpty() == true && t.forcedTime > 0))
+        }
         if (!hasForced) return
         pollJob = scope.launch {
             while (coroutineContext[Job]!!.isActive) {
@@ -69,6 +74,14 @@ class TaskRunner(private val service: DramaAccessibilityService) {
                     if (task.packageName.isEmpty() && task.disableIfAppGroupMatch.isNotEmpty() &&
                         tasks.any { it.packageName == pkg && it.name.contains(task.disableIfAppGroupMatch) }
                     ) continue
+                    // 多步骤编排组:forcedTime 窗口内轮询触发场景流
+                    val steps = task.steps
+                    if (steps != null && steps.isNotEmpty()) {
+                        if (task.forcedTime > 0 && now - bootAt <= task.forcedTime) {
+                            tryLaunchScene(task, steps, root, now)
+                        }
+                        continue
+                    }
                     for (rule in task.rules) {
                         val ft = groupOr(task.forcedTime, rule.forcedTime)
                         if (ft <= 0 || now - bootAt > ft) continue
@@ -95,6 +108,12 @@ class TaskRunner(private val service: DramaAccessibilityService) {
                 tasks.any { it.packageName == packageName && it.name.contains(task.disableIfAppGroupMatch) }
             ) continue
             if (!activityMatch(task.activityIds, activityName)) continue
+            // 多步骤编排组:规则不独立调度,由第一步匹配启动场景流
+            val steps = task.steps
+            if (steps != null && steps.isNotEmpty()) {
+                tryLaunchScene(task, steps, root, now)
+                continue
+            }
             // 规则排序:优先级(窗内)在前,其余按 order;普通规则不被优先级规则中断(简化:一次遍历内先执行优先级)
             val ranked = task.rules
                 .map { it to state(task, it) }
@@ -162,8 +181,151 @@ class TaskRunner(private val service: DramaAccessibilityService) {
         return false
     }
 
+    // ---- 场景流(多步骤编排) ----
+
+    /** 步骤匹配:与规则同语义(matches 全命中 + anyMatches 任一 + exclude 排除;全空 = 无条件步) */
+    private fun stepMatches(root: AccessibilityNodeInfo, step: GkdTask.Step): Boolean {
+        if (step.excludeMatches.isNotEmpty() && step.excludeMatches.any { it.find(root).isNotEmpty() }) return false
+        if (step.matches.isNotEmpty()) return step.matches.all { it.find(root).isNotEmpty() }
+        if (step.anyMatches.isNotEmpty()) return step.anyMatches.any { it.find(root).isNotEmpty() }
+        return true
+    }
+
+    /** 场景流启动:第一步命中且不在途、过了组级冷却才启动(状态键独立于 rules,步骤组 rules 可为空) */
+    private fun tryLaunchScene(task: GkdTask, steps: List<GkdTask.Step>, root: AccessibilityNodeInfo, now: Long) {
+        if (sceneJobs.containsKey(task.id)) return
+        val s = execStates.getOrPut("${task.id}|scene") { ExecState() }
+        val cd = groupOr(task.actionCd, 0L, 1000L)
+        if (s.lastAt > 0 && now - s.lastAt < cd) return
+        val max = task.actionMaximum
+        if (max > 0 && s.count >= max) return
+        val first = steps.first()
+        if (!stepMatches(root, first)) return
+        launchScene(task, steps, s)
+    }
+
+    private fun launchScene(task: GkdTask, steps: List<GkdTask.Step>, s: ExecState) {
+        LogStore.log("▶ 场景流「${task.name}」启动(${steps.size} 步)")
+        val job = scope.launch {
+            val self = coroutineContext[Job]!!
+            try {
+                runScene(task, steps)
+                s.count++
+                s.lastAt = System.currentTimeMillis()
+            } catch (e: kotlinx.coroutines.CancellationException) {
+                throw e
+            } finally {
+                if (sceneJobs[task.id] === self) sceneJobs.remove(task.id)
+            }
+        }
+        sceneJobs[task.id] = job
+    }
+
+    /** 按序执行步骤:每步等目标出现(waitTimeout)→ 稳定 → 执行动作;超时按策略跳过或终止 */
+    private suspend fun runScene(task: GkdTask, steps: List<GkdTask.Step>) {
+        for ((i, step) in steps.withIndex()) {
+            val label = step.name.ifEmpty { "步骤${i + 1}" }
+            val target = awaitStepTarget(step)
+            if (target == null) {
+                if (step.onTimeout == GkdTask.Step.TimeoutPolicy.Continue) {
+                    LogStore.log("  ↳ 「$label」等待超时,跳过")
+                    continue
+                }
+                LogStore.log("  ⏹ 「$label」等待超时,流终止")
+                return
+            }
+            delay(step.settleTime)
+            delay(groupOr(task.actionDelay, 0L))
+            executeStep(task, step, target, label)
+        }
+        LogStore.log("✔ 场景流「${task.name}」完成")
+    }
+
+    /** 轮询等待步骤目标出现;waitTimeout=0 时只查当帧 */
+    private suspend fun awaitStepTarget(step: GkdTask.Step): AccessibilityNodeInfo? {
+        val deadline = if (step.waitTimeout <= 0L) 0L else System.currentTimeMillis() + step.waitTimeout
+        val interval = if (step.waitInterval > 0L) step.waitInterval else 250L
+        while (true) {
+            val root = service.rootInActiveWindow
+            if (root != null && stepMatches(root, step)) {
+                val sel = step.matches.lastOrNull() ?: step.anyMatches.firstOrNull()
+                val node = sel?.find(root)?.firstOrNull()
+                if (node != null || (step.matches.isEmpty() && step.anyMatches.isEmpty())) return node
+            }
+            if (deadline == 0L || System.currentTimeMillis() >= deadline) return null
+            delay(interval)
+        }
+    }
+
+    /** 步骤动作执行:与规则共用动作语义(position/swipeArg 分支照抄 executeRule) */
+    private fun executeStep(task: GkdTask, step: GkdTask.Step, target: AccessibilityNodeInfo, label: String) {
+        val action = step.action ?: Action.Click
+        val r = android.graphics.Rect()
+        target.getBoundsInScreen(r)
+        when (action) {
+            Action.Click, Action.ClickNode, Action.ClickCenter -> {
+                when {
+                    action == Action.ClickCenter || (action == Action.Click && step.position != null) ->
+                        clickAtRect(step.position, r)
+                    action == Action.ClickNode -> target.performAction(AccessibilityNodeInfo.ACTION_CLICK)
+                    else -> if (!target.performAction(ACTION_CLICK)) clickAtRect(step.position, r)
+                }
+                LogStore.log("  ↳ 「$label」点击")
+            }
+            Action.LongClick, Action.LongClickNode, Action.LongClickCenter -> {
+                when {
+                    action == Action.LongClickCenter || (action == Action.LongClick && step.position != null) ->
+                        longClickAtRect(step.position, r)
+                    action == Action.LongClickNode -> target.performAction(ACTION_LONG_CLICK)
+                    else -> if (!target.performAction(ACTION_LONG_CLICK)) longClickAtRect(step.position, r)
+                }
+                LogStore.log("  ↳ 「$label」长按")
+            }
+            Action.Back -> {
+                service.goBack()
+                LogStore.log("  ↳ 「$label」返回键")
+            }
+            Action.Swipe -> {
+                val arg = step.swipeArg
+                when {
+                    arg != null -> {
+                        val startP = arg.start.calc(r, service.screenWidth(), service.screenHeight())
+                        val endP = arg.end?.calc(r, service.screenWidth(), service.screenHeight()) ?: startP
+                        if (startP != null && endP != null) {
+                            service.swipe(startP.first, startP.second, endP.first, endP.second, arg.duration)
+                        }
+                    }
+                    else -> service.swipeUp()
+                }
+                LogStore.log("  ↳ 「$label」滑动")
+            }
+            Action.InputText -> {
+                target.performAction(AccessibilityNodeInfo.ACTION_FOCUS)
+                LogStore.log("  ↳ 「$label」输入文本(聚焦)")
+            }
+            Action.LaunchApp -> LogStore.log("  ↳ 「$label」启动应用(待实现)")
+            Action.Check, Action.Uncheck -> {
+                val ok = target.performAction(
+                    if (action == Action.Check) AccessibilityNodeInfo.ACTION_SELECT
+                    else AccessibilityNodeInfo.ACTION_CLEAR_SELECTION,
+                )
+                LogStore.log("  ↳ 「$label」${if (action == Action.Check) "勾选" else "取消勾选"}${if (ok) "" else "(失败)"}")
+            }
+            Action.None -> LogStore.log("  ↳ 「$label」匹配标记(无动作)")
+        }
+    }
+
     /** 离开目标包名:清执行记录、按 resetMatch=app 重置计数、停掉在途执行 */
     fun onLeftPackage(packageName: String) {
+        sceneJobs.entries.removeIf { (k, job) ->
+            val task = tasks.firstOrNull { it.id == k } ?: return@removeIf false
+            val hit = task.packageName == packageName || task.packageName.isEmpty()
+            if (hit) {
+                LogStore.log("⏹ 场景流「${task.name}」因离开应用终止")
+                job.cancel()
+            }
+            hit
+        }
         execStates.entries.removeIf { (k, _) ->
             val task = tasks.firstOrNull { it.id == k.substringBefore('|') } ?: return@removeIf false
             // 应用规则:离开即清;全局规则(packageName 空)按 resetMatch=app 在离开任意应用时重置
@@ -186,6 +348,8 @@ class TaskRunner(private val service: DramaAccessibilityService) {
     fun cancelAll() {
         jobs.values.forEach { it.cancel() }
         jobs.clear()
+        sceneJobs.values.forEach { it.cancel() }
+        sceneJobs.clear()
         execStates.clear()
     }
 
@@ -305,6 +469,25 @@ class TaskRunner(private val service: DramaAccessibilityService) {
 
     private fun longClickAtWithPosition(rule: GkdTask.Rule, r: android.graphics.Rect) {
         val p = rule.position
+        val point = p?.takeIf { it.isValid }?.calc(r, service.screenWidth(), service.screenHeight())
+        if (point != null) {
+            service.longClickAt(point.first, point.second)
+        } else if (!r.isEmpty) {
+            service.longClickAt(r.exactCenterX(), r.exactCenterY())
+        }
+    }
+
+    /** 步骤 position 六字段表达式求坐标;无效或缺省回退节点中心(与规则 clickAtWithPosition 同语义) */
+    private fun clickAtRect(p: GkdTask.Position?, r: android.graphics.Rect) {
+        val point = p?.takeIf { it.isValid }?.calc(r, service.screenWidth(), service.screenHeight())
+        if (point != null) {
+            service.clickAt(point.first, point.second)
+        } else if (!r.isEmpty) {
+            service.clickAt(r.exactCenterX(), r.exactCenterY())
+        }
+    }
+
+    private fun longClickAtRect(p: GkdTask.Position?, r: android.graphics.Rect) {
         val point = p?.takeIf { it.isValid }?.calc(r, service.screenWidth(), service.screenHeight())
         if (point != null) {
             service.longClickAt(point.first, point.second)

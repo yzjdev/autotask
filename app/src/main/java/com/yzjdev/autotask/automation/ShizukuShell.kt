@@ -59,6 +59,9 @@ object ShizukuShell {
                 -1
             }
             Result(exitCode, drainStream(proc.inputStream), drainStream(proc.errorStream))
+        } catch (e: Throwable) {
+            // 高频 exec 后 binder 可能短暂失效(DeadObjectException):统一转失败结果,不让调用协程崩溃
+            Result(-1, "", "读取命令输出失败:${e.message}")
         } finally {
             try {
                 proc.destroy()
