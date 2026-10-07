@@ -43,16 +43,28 @@ object TaskStore {
      * 不按 launcher 入口过滤:纯 widget/服务类应用同样要出现在列表中
      * (自动化任务可能只需匹配前台包名,不一定要能拉起)。
      * 依赖 QUERY_ALL_PACKAGES(Android 11+ package visibility)。
+     * 同轮返回包名 → (firstInstallTime, versionName),均来自同一批 PackageInfo,无逐包二次查询。
      */
-    fun loadInstalledApps(context: Context, includeSystem: Boolean = true): List<AppInfo> {
+    fun loadInstalledApps(context: Context, includeSystem: Boolean = true): Pair<List<AppInfo>, Map<String, Pair<Long, String>>> {
         val pm = context.packageManager
-        return pm.getInstalledPackages(0)
-            .asSequence()
+        val infos = pm.getInstalledPackages(0)
+        val candidates = infos.asSequence()
             .mapNotNull { it.applicationInfo }
             .filter { includeSystem || (it.flags and android.content.pm.ApplicationInfo.FLAG_SYSTEM) == 0 }
-            .map { AppInfo(it.packageName, pm.getApplicationLabel(it).toString(), (it.flags and android.content.pm.ApplicationInfo.FLAG_SYSTEM) != 0) }
-            .sortedBy { it.label.lowercase() }
             .toList()
+        // label 解析需加载各 APK 资源,是主要耗时:并行执行
+        val labels = candidates.parallelStream()
+            .collect(
+                { HashMap<String, String>() },
+                { acc, ai -> acc[ai.packageName] = runCatching { pm.getApplicationLabel(ai).toString() }.getOrDefault(ai.packageName) },
+                { a, b -> a.putAll(b) }
+            )
+        val apps = candidates.map { AppInfo(it.packageName, labels[it.packageName] ?: it.packageName, (it.flags and android.content.pm.ApplicationInfo.FLAG_SYSTEM) != 0) }
+            .sortedBy { it.label.lowercase() }
+        val meta = infos.associate {
+            it.packageName to Pair(it.firstInstallTime, it.versionName ?: "")
+        }
+        return apps to meta
     }
 
     /** 应用条目:包名 + 显示名 + 是否系统应用 */

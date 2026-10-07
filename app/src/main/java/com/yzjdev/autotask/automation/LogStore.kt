@@ -27,8 +27,13 @@ object LogStore {
     private var seq = 0L
     private val listeners = ArrayList<(List<Entry>) -> Unit>()
 
+    /** 打印开关:关闭时 log() 直接丢弃,不写入不通知 */
+    @Volatile
+    var enabled: Boolean = true
+
     /** 追加一条日志;超出容量丢弃最旧的 */
     fun log(message: String) {
+        if (!enabled) return
         val snapshot: List<Entry>
         synchronized(lock) {
             entries.addLast(Entry(System.currentTimeMillis(), message))

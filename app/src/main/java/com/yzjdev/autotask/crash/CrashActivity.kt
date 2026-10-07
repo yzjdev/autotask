@@ -156,7 +156,7 @@ class CrashActivity : Activity() {
         // 红色错误卡片:摘要一行 + 完整堆栈;点按/长按均可复制
         val errorBox = LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL
-            background = roundedBackground(dp(14), RED_ERROR_BG)
+            background = roundedBackground(dp(8), RED_ERROR_BG)
             setPadding(dp(14), dp(12), dp(14), dp(12))
             // 点击整卡复制红色错误内容(摘要 + 堆栈)
             setOnClickListener { copyError(info) }
@@ -203,7 +203,7 @@ class CrashActivity : Activity() {
         // 元信息卡片:时间 / 设备 / 版本 / 线程,键左值右
         val metaBox = LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL
-            background = roundedBackground(dp(14), CHIP_BG)
+            background = roundedBackground(dp(8), CHIP_BG)
             setPadding(dp(14), dp(10), dp(14), dp(10))
         }
         fun metaRow(label: String, value: String, last: Boolean = false) {
@@ -248,7 +248,7 @@ class CrashActivity : Activity() {
             setTextColor(RED_ACCENT)
             textSize = 14f
             isAllCaps = false
-            background = rippleBackground(dp(12), Color.TRANSPARENT, strokeColor = 0x66F87171)
+            background = rippleBackground(dp(8), Color.TRANSPARENT, strokeColor = 0x66F87171)
         }
         val restartButton = Button(this).apply {
             id = R.id.crash_button_restart
@@ -257,7 +257,7 @@ class CrashActivity : Activity() {
             textSize = 14f
             setTypeface(null, Typeface.BOLD)
             isAllCaps = false
-            background = rippleBackground(dp(12), RED_BTN)
+            background = rippleBackground(dp(8), RED_BTN)
         }
         val exitButton = Button(this).apply {
             id = R.id.crash_button_exit
@@ -265,7 +265,7 @@ class CrashActivity : Activity() {
             setTextColor(TEXT_SECONDARY)
             textSize = 14f
             isAllCaps = false
-            background = rippleBackground(dp(12), CHIP_BG)
+            background = rippleBackground(dp(8), CHIP_BG)
         }
 
         val buttonRow = LinearLayout(this).apply {

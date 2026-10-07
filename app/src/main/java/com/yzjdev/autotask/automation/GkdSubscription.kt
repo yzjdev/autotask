@@ -71,6 +71,18 @@ object GkdSubscription {
         return ImportResult(tasks, skipped)
     }
 
+    // ==================== 单组解析(JSON 编辑视图用) ====================
+
+    /** 解析单个 GKD 规则组 JSON 对象(key/name 缺失时兜底),返回应用了组级默认值的 GkdTask */
+    fun parseGroup(text: String): Result<GkdTask> {
+        val root0 = runCatching { json.parseToJsonElement(text) }
+            .getOrElse { json.parseToJsonElement(stripJson5(text)) }.jsonObject
+        val root = root0.toMutableMap()
+        if (root["key"] == null) root["key"] = JsonPrimitive((System.currentTimeMillis() % 100000).toInt())
+        if (root["name"] == null) root["name"] = JsonPrimitive("")
+        return runCatching { appGroupToTask(jsonToGroupRaw(JsonObject(root)), "") }
+    }
+
     // ==================== 组 → GkdTask ====================
 
     private fun appGroupToTask(g: RawAppGroup, appId: String): GkdTask = GkdTask(
@@ -500,6 +512,10 @@ object GkdSubscription {
             id to name
         }
     }.getOrDefault(emptyList())
+
+    /** 单组 → GKD 组 JSON(编辑器 JSON 视图的表单→JSON 方向) */
+    fun groupToJson(task: GkdTask): String =
+        json.encodeToString(JsonObject.serializer(), exportGroup(task))
 
     // ==================== 导出(本地规则 → GKD 订阅 JSON) ====================
 

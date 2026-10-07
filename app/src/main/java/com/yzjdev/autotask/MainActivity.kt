@@ -20,6 +20,8 @@ import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.foundation.background
 import androidx.compose.foundation.gestures.detectVerticalDragGestures
+import androidx.compose.foundation.layout.ExperimentalLayoutApi
+import androidx.compose.foundation.layout.FlowRow
 import androidx.compose.foundation.layout.BoxWithConstraints
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.input.pointer.pointerInput
@@ -29,10 +31,9 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.foundation.layout.offset
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.layout.Arrangement
-import androidx.compose.foundation.BorderStroke
-import androidx.compose.foundation.border
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.ColumnScope
 import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
@@ -64,6 +65,7 @@ import androidx.compose.material.icons.filled.Language
 import androidx.compose.material.icons.filled.WifiOff
 import androidx.compose.material.icons.filled.Wifi
 import androidx.compose.material.icons.filled.Check
+import androidx.compose.material.icons.filled.Cancel
 import androidx.compose.material.icons.filled.Close
 import androidx.compose.material.icons.filled.Home
 import androidx.compose.material.icons.filled.KeyboardArrowDown
@@ -75,6 +77,7 @@ import androidx.compose.material.icons.filled.CloudDownload
 import androidx.compose.material.icons.filled.GetApp
 import androidx.compose.material.icons.filled.HourglassTop
 import androidx.compose.material.icons.filled.RadioButtonChecked
+import androidx.compose.material.icons.filled.RadioButtonUnchecked
 import androidx.compose.material.icons.filled.Search
 import androidx.compose.material.icons.filled.Shield
 import androidx.compose.material.icons.filled.BatterySaver
@@ -84,10 +87,22 @@ import androidx.compose.material.icons.filled.Security
 import androidx.compose.material.icons.automirrored.filled.Rule
 import androidx.compose.material.icons.filled.SwipeVertical
 import androidx.compose.material.icons.filled.Timer
-import androidx.compose.material.icons.filled.TouchApp
 import androidx.compose.material.icons.filled.Update
 import androidx.compose.material.icons.filled.Add
+import androidx.compose.material.icons.filled.Tune
+import androidx.compose.material.icons.automirrored.filled.ListAlt
+import androidx.compose.material.icons.filled.PlayCircle
+import androidx.compose.material.icons.filled.PlaylistAddCheck
+import androidx.compose.material.icons.filled.ExpandMore
+import androidx.compose.material.icons.filled.TouchApp
+import androidx.compose.material.icons.filled.CheckCircle
+import androidx.compose.material.icons.filled.Error
+import androidx.compose.material.icons.filled.Info
+import androidx.compose.material.icons.filled.ArrowForward
+import androidx.compose.material.icons.filled.ArrowBack
+import androidx.compose.material.icons.filled.DoneAll
 import androidx.compose.material3.AlertDialog
+import androidx.compose.foundation.text.BasicTextField
 import androidx.compose.material3.DropdownMenu
 import androidx.compose.material3.DropdownMenuItem
 import androidx.compose.material3.Button
@@ -97,7 +112,6 @@ import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.CardDefaults
 import androidx.compose.material3.Checkbox
 import androidx.compose.material3.ExperimentalMaterial3Api
-import androidx.compose.material3.FilterChip
 import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
@@ -138,20 +152,30 @@ import androidx.lifecycle.compose.LocalLifecycleOwner
 import androidx.compose.animation.core.FastOutSlowInEasing
 import androidx.compose.animation.core.RepeatMode
 import androidx.compose.animation.core.animateFloat
+import androidx.compose.animation.core.animateFloatAsState
 import androidx.compose.animation.core.infiniteRepeatable
 import androidx.compose.animation.core.rememberInfiniteTransition
+import androidx.compose.animation.core.spring
 import androidx.compose.animation.core.tween
+import androidx.compose.animation.AnimatedVisibility
+import androidx.compose.animation.animateContentSize
+import androidx.compose.animation.expandVertically
+import androidx.compose.animation.shrinkVertically
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.ui.draw.drawWithContent
 import androidx.compose.ui.geometry.Offset
+import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.tooling.preview.Preview
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.RectangleShape
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Shape
 import androidx.compose.ui.draw.alpha
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.draw.rotate
 import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
 import kotlinx.coroutines.Dispatchers
@@ -161,6 +185,8 @@ import kotlinx.coroutines.launch
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.withContext
+import kotlinx.serialization.builtins.serializer
+import kotlinx.serialization.json.Json
 import com.yzjdev.autotask.automation.AutomationManager
 import com.yzjdev.autotask.automation.DramaAccessibilityService
 import com.yzjdev.autotask.automation.ShizukuShell
@@ -180,6 +206,8 @@ class MainActivity : ComponentActivity() {
         super.onCreate(savedInstanceState)
         enableEdgeToEdge()
         applyRecentsHidden(this)
+        // 日志打印开关:随偏好设置生效(引擎进程内生效)
+        LogStore.enabled = getSharedPreferences("logs_ui", MODE_PRIVATE).getBoolean("log_enabled", true)
         setContent {
             AutoTaskTheme {
                 AutomationScreen()
@@ -283,10 +311,14 @@ fun AutomationScreen() {
     // 规则多时 JSON 反序列化耗时会卡首帧,初始空表 + 后台加载
     var tasks by remember { mutableStateOf(emptyList<GkdTask>()) }
     // 订阅导入后同步:RuleSync.version 变化即从磁盘重载规则列表(引擎已由导入方直接换表)
+    // 订阅数量同样提升到顶层:切 tab 回主页不再重新读盘导致描述文案跳变
+    var subCount by remember { mutableStateOf<Int?>(null) }
     LaunchedEffect(Unit) {
         tasks = withContext(Dispatchers.IO) { TaskStore.loadAll(context.applicationContext) }
+        subCount = withContext(Dispatchers.IO) { SubscriptionStore.loadAll(context.applicationContext).size }
         snapshotFlow { RuleSync.version }.drop(1).collect {
             tasks = withContext(Dispatchers.IO) { TaskStore.loadAll(context.applicationContext) }
+            subCount = withContext(Dispatchers.IO) { SubscriptionStore.loadAll(context.applicationContext).size }
         }
     }
     fun persistTasks(next: List<GkdTask>) {
@@ -301,16 +333,23 @@ fun AutomationScreen() {
     // 系统的「查询所有应用」权限弹窗,MIUI 等会在 getInstalledPackages 时弹)
     var installedApps by remember { mutableStateOf<List<TaskStore.AppInfo>?>(null) }
     var appsLoadedOnce by remember { mutableStateOf(false) }
+    // 安装时间/版本号元数据:与列表同轮查询,供「最近安装」排序与版本号标签展示
+    var installTimes by remember { mutableStateOf<Map<String, Long>>(emptyMap()) }
+    var versionsByPkg by remember { mutableStateOf<Map<String, String>>(emptyMap()) }
     fun loadInstalledApps() {
         // 加载中防重入;异常兜底(MIUI 等查询被拒抛异常)不能让状态悬空
         if (appsLoadedOnce && installedApps != null) return
         appsLoadedOnce = true
         scope.launch {
-            installedApps = withContext(Dispatchers.Default) {
+            val loaded = withContext(Dispatchers.Default) {
+                // firstInstallTime/versionName 已随 getInstalledPackages 一次带回,无需逐包二次查询
                 runCatching {
                     TaskStore.loadInstalledApps(context.applicationContext, includeSystem = true)
                 }.getOrNull()
-            } ?: installedApps
+            } ?: return@launch
+            installedApps = loaded.first
+            installTimes = loaded.second.mapValues { it.value.first }
+            versionsByPkg = loaded.second.mapValues { it.value.second }
         }
     }
     LaunchedEffect(tab) {
@@ -352,8 +391,7 @@ fun AutomationScreen() {
     // 有任务的应用始终保留,否则任务无法管理。isSystem 供 AppsScreen 按 tab 过滤。
     // 全局规则(packageName 空)不产生条目;未安装应用不显示(其规则仍在任务表中保留,
     // 应用装回后自动恢复显示)
-    var installTimes by remember { mutableStateOf<Map<String, Long>>(emptyMap()) }
-    val allApps = remember(installedApps, tasks, installTimes) {
+    val allApps = remember(installedApps, tasks, installTimes, versionsByPkg) {
         val infos = (installedApps ?: emptyList()).associateBy { it.packageName }
         // 任务计数一次统计,避免逐包 count 的 O(n×m)
         val countByPkg = tasks.groupingBy { it.packageName }.eachCount()
@@ -365,27 +403,9 @@ fun AutomationScreen() {
                 isSystem = infos[pkg]?.isSystem ?: false,
                 installTime = installTimes[pkg] ?: 0L,
                 installed = true,
+                version = versionsByPkg[pkg] ?: "",
             )
         }.sortedWith(compareBy<AppRow> { it.packageName.isNotEmpty() }.thenBy { it.label.lowercase() })
-    }
-    // 安装时间批查懒加载:分批回写,边查边纠正「最近安装」排序,不整批等完
-    LaunchedEffect(installedApps, tasks, tab) {
-        if (tab != 1) return@LaunchedEffect
-        val pkgs = buildSet {
-            (installedApps ?: emptyList()).forEach { add(it.packageName) }
-            tasks.forEach { add(it.packageName) }
-        }
-        val pending = pkgs.filterNot { installTimes.containsKey(it) }
-        if (pending.isEmpty()) return@LaunchedEffect
-        val pm = context.packageManager
-        pending.chunked(50).forEach { chunk ->
-            val loaded = withContext(Dispatchers.Default) {
-                chunk.associateWith { pkg ->
-                    runCatching { pm.getPackageInfo(pkg, 0).firstInstallTime }.getOrDefault(0L)
-                }
-            }
-            installTimes = installTimes + loaded
-        }
     }
     // 应用图标缓存:后台逐包加载,每 20 个回写一次增量刷新(列表图标逐步出现,不整批等完);
     // 仅在「应用」tab 才开始逐包取图标,首页不触发任何包管理器批量查询
@@ -527,6 +547,7 @@ fun AutomationScreen() {
                     listState = appsListState,
                     allApps = allApps,
                     iconsByPkg = iconsByPkg,
+                    loading = installedApps == null,
                     query = query,
                     onQueryChange = { query = it },
                     onOpenApp = { taskPagePkg = it },
@@ -587,6 +608,7 @@ fun AutomationScreen() {
                 uiState = uiState,
                 serviceBound = serviceBound,
                 overlayOn = overlayOn,
+                subCount = subCount,
                 onOverlayToggle = {
                     val target = !overlayOn
                     val ok = DramaAccessibilityService.instance
@@ -640,6 +662,7 @@ private fun HomeScreen(
     uiState: AutomationManager.State,
     serviceBound: Boolean,
     overlayOn: Boolean,
+    subCount: Int?,
     onOverlayToggle: () -> Unit,
     onToggleAccessibility: () -> Unit,
     modifier: Modifier = Modifier,
@@ -676,6 +699,7 @@ private fun HomeScreen(
                 icon = Icons.Filled.Adjust,
                 accent = MaterialTheme.colorScheme.tertiary,
                 title = "节点悬浮窗",
+                description = "查看屏幕节点,辅助编写选择器",
                 checked = overlayOn,
                 enabled = uiState.isAccessibilityEnabled,
                 onToggle = onOverlayToggle,
@@ -685,6 +709,7 @@ private fun HomeScreen(
                 icon = Icons.Filled.Layers,
                 accent = MaterialTheme.colorScheme.secondary,
                 title = "隐藏最近任务",
+                description = "从最近任务列表中排除本应用",
                 checked = recentsHidden,
                 enabled = true,
                 onToggle = {
@@ -697,11 +722,6 @@ private fun HomeScreen(
 
         // 远程订阅入口:已订阅数量,点击打开管理(URL 添加/刷新/删除)
         var subDialogOpen by remember { mutableStateOf(false) }
-        // 已订阅数量:读取也放后台,避免大 JSON 反序列化卡首帧
-        var subCount by remember { mutableStateOf(0) }
-        LaunchedEffect(subDialogOpen) {
-            subCount = withContext(Dispatchers.IO) { SubscriptionStore.loadAll(context).size }
-        }
         Card(
             onClick = { subDialogOpen = true },
             modifier = Modifier.fillMaxWidth(),
@@ -732,7 +752,8 @@ private fun HomeScreen(
                         color = MaterialTheme.colorScheme.onSurface,
                     )
                     Text(
-                        text = if (subCount == 0) "添加 GKD 订阅链接,自动导入规则" else "已订阅 $subCount 个,点击管理",
+                        text = if (subCount != null && subCount > 0) "已订阅 $subCount 个,点击管理"
+                               else "添加 GKD 订阅链接,自动导入规则",
                         style = MaterialTheme.typography.bodySmall,
                         color = MaterialTheme.colorScheme.onSurfaceVariant,
                     )
@@ -831,14 +852,14 @@ private fun ControlPanel(
         ) {
             // 电源拨盘:光晕 + 光环 + 中央按钮
             Box(
-                modifier = Modifier.size(168.dp),
+                modifier = Modifier.size(128.dp),
                 contentAlignment = Alignment.Center,
             ) {
                 // 光晕:运行中才显示
                 if (serviceConnected) {
                     Box(
                         modifier = Modifier
-                            .size(168.dp)
+                            .size(128.dp)
                             .background(
                                 Brush.radialGradient(
                                     listOf(accent.copy(alpha = 0.25f), Color.Transparent),
@@ -849,14 +870,14 @@ private fun ControlPanel(
                 // 状态光环:已连接满环;待连接旋转(不确定进度);未开启空环
                 CircularProgressIndicator(
                     progress = { if (serviceConnected) 1f else 0f },
-                    modifier = Modifier.size(168.dp),
+                    modifier = Modifier.size(128.dp),
                     color = accent,
                     trackColor = MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.4f),
                     strokeWidth = 4.dp,
                 )
                 if (servicePending) {
                     CircularProgressIndicator(
-                        modifier = Modifier.size(168.dp),
+                        modifier = Modifier.size(128.dp),
                         color = accent,
                         trackColor = Color.Transparent,
                         strokeWidth = 4.dp,
@@ -872,13 +893,13 @@ private fun ControlPanel(
                         MaterialTheme.colorScheme.surfaceVariant
                     },
                     shadowElevation = 6.dp,
-                    modifier = Modifier.size(128.dp),
+                    modifier = Modifier.size(96.dp),
                 ) {
                     Box(contentAlignment = Alignment.Center) {
                         Icon(
                             imageVector = Icons.Filled.PowerSettingsNew,
                             contentDescription = "启停无障碍服务",
-                            modifier = Modifier.size(56.dp),
+                            modifier = Modifier.size(44.dp),
                             tint = if (serviceConnected) {
                                 MaterialTheme.colorScheme.onPrimary
                             } else {
@@ -903,13 +924,14 @@ private fun ControlPanel(
     }
 }
 
-/** 功能切换胶囊:整胶囊可点,强调色圆点 + 图标 + 标题,开启时染上强调色 */
+/** 功能切换胶囊:整胶囊可点,强调色圆点 + 图标 + 标题(+ 可选描述),开启时染上强调色 */
 @Composable
 private fun TogglePill(
     modifier: Modifier = Modifier,
     icon: ImageVector,
     accent: Color,
     title: String,
+    description: String? = null,
     checked: Boolean,
     enabled: Boolean,
     onToggle: () -> Unit,
@@ -917,8 +939,7 @@ private fun TogglePill(
     Surface(
         onClick = onToggle,
         modifier = modifier
-            .fillMaxWidth()
-            .height(64.dp),
+            .fillMaxWidth(),
         shape = MaterialTheme.shapes.large,
         color = if (checked) {
             accent.copy(alpha = 0.2f)
@@ -928,8 +949,9 @@ private fun TogglePill(
     ) {
         Row(
             modifier = Modifier
-                .fillMaxSize()
-                .padding(horizontal = 14.dp),
+                .fillMaxWidth()
+                .padding(horizontal = 14.dp, vertical = if (description != null) 10.dp else 0.dp)
+                .then(if (description == null) Modifier.height(64.dp) else Modifier),
             verticalAlignment = Alignment.CenterVertically,
         ) {
             Box(
@@ -946,18 +968,38 @@ private fun TogglePill(
                 )
             }
             Spacer(modifier = Modifier.width(10.dp))
-            Text(
-                text = title,
-                style = MaterialTheme.typography.titleSmall,
-                fontWeight = FontWeight.SemiBold,
-                maxLines = 2,
-                overflow = TextOverflow.Ellipsis,
-                color = if (enabled) {
-                    MaterialTheme.colorScheme.onSurface
-                } else {
-                    MaterialTheme.colorScheme.onSurfaceVariant
-                },
-            )
+            if (description != null) {
+                Column {
+                    Text(
+                        text = title,
+                        style = MaterialTheme.typography.titleSmall,
+                        fontWeight = FontWeight.SemiBold,
+                        color = if (enabled) {
+                            MaterialTheme.colorScheme.onSurface
+                        } else {
+                            MaterialTheme.colorScheme.onSurfaceVariant
+                        },
+                    )
+                    Text(
+                        text = description,
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    )
+                }
+            } else {
+                Text(
+                    text = title,
+                    style = MaterialTheme.typography.titleSmall,
+                    fontWeight = FontWeight.SemiBold,
+                    maxLines = 2,
+                    overflow = TextOverflow.Ellipsis,
+                    color = if (enabled) {
+                        MaterialTheme.colorScheme.onSurface
+                    } else {
+                        MaterialTheme.colorScheme.onSurfaceVariant
+                    },
+                )
+            }
             Spacer(modifier = Modifier.weight(1f))
         }
     }
@@ -1045,6 +1087,7 @@ private data class AppRow(
     val isSystem: Boolean,
     val installTime: Long = 0L,
     val installed: Boolean = true,
+    val version: String = "",
 )
 
 /** 场景流步骤编辑草稿:文本态字段,保存时解析为 GkdTask.Step */
@@ -1055,7 +1098,105 @@ private data class StepDraft(
     val waitTimeoutText: String,
     val settleTimeText: String,
     val skipOnTimeout: Boolean,
+    val triggerOnAbsent: Boolean = false,
 )
+
+/** 居中的占位内容(加载/空状态) */
+@Composable
+private fun CenteredPlaceholder(content: @Composable ColumnScope.() -> Unit) {
+    Box(modifier = Modifier.fillMaxSize()) {
+        Column(
+            modifier = Modifier.align(Alignment.Center),
+            horizontalAlignment = Alignment.CenterHorizontally,
+        ) {
+            content()
+        }
+    }
+}
+
+/** 应用列表加载图标:2×2 应用宫格,四格波纹式渐亮渐灭 */
+@Composable
+private fun AppsLoadingIcon() {
+    val accent = MaterialTheme.colorScheme.primary
+    val anim = rememberInfiniteTransition()
+        .animateFloat(
+            initialValue = 0f,
+            targetValue = 1f,
+            animationSpec = infiniteRepeatable(tween(1200), RepeatMode.Restart),
+            label = "wave",
+        ).value
+    Box(
+        modifier = Modifier
+            .size(88.dp)
+            .clip(CircleShape)
+            .background(Brush.linearGradient(listOf(accent.copy(alpha = 0.12f), accent.copy(alpha = 0.05f)))),
+        contentAlignment = Alignment.Center,
+    ) {
+        val gap = 6.dp
+        val tile = 15.dp
+        Row(horizontalArrangement = Arrangement.spacedBy(gap)) {
+            Column(verticalArrangement = Arrangement.spacedBy(gap)) {
+                tileWaveBox(accent, anim, 0, tile)
+                tileWaveBox(accent, anim, 2, tile)
+            }
+            Column(verticalArrangement = Arrangement.spacedBy(gap)) {
+                tileWaveBox(accent, anim, 1, tile)
+                tileWaveBox(accent, anim, 3, tile)
+            }
+        }
+    }
+}
+
+@Composable
+private fun tileWaveBox(color: Color, wave: Float, index: Int, size: Dp) {
+    // 四格相位错开,亮→暗循环,形成流动的波纹
+    val a = (wave + index * 0.25f) % 1f
+    val alpha = 0.25f + 0.75f * (0.5f + 0.5f * Math.cos(a * Math.PI * 2).toFloat())
+    Box(
+        modifier = Modifier
+            .size(size)
+            .clip(RoundedCornerShape(4.dp))
+            .background(color.copy(alpha = alpha)),
+    )
+}
+
+/** 应用列表空状态图标:应用宫格,搜索无结果时叠加放大镜角标 */
+@Composable
+private fun AppsEmptyIcon(searching: Boolean) {
+    val accent = MaterialTheme.colorScheme.primary
+    Box(
+        modifier = Modifier
+            .size(88.dp)
+            .clip(CircleShape)
+            .background(Brush.linearGradient(listOf(accent.copy(alpha = 0.12f), accent.copy(alpha = 0.05f)))),
+        contentAlignment = Alignment.Center,
+    ) {
+        Icon(
+            imageVector = Icons.Filled.Apps,
+            contentDescription = null,
+            tint = accent.copy(alpha = 0.6f),
+            modifier = Modifier.size(40.dp),
+        )
+        if (searching) {
+            Box(
+                modifier = Modifier
+                    .align(Alignment.BottomEnd)
+                    .offset(x = 6.dp, y = 6.dp)
+                    .size(30.dp)
+                    .clip(CircleShape)
+                    .background(accent),
+                contentAlignment = Alignment.Center,
+            ) {
+                Icon(
+                    imageVector = Icons.Filled.Search,
+                    contentDescription = null,
+                    tint = MaterialTheme.colorScheme.onPrimary,
+                    modifier = Modifier.size(18.dp),
+                )
+            }
+        }
+    }
+}
 
 /** 应用 tab:用户应用 / 系统应用分 tab,标题栏内搜索;点应用进入该应用的独立任务页,长按弹出应用信息抽屉 */
 @OptIn(ExperimentalFoundationApi::class, ExperimentalMaterial3Api::class)
@@ -1064,6 +1205,7 @@ private fun AppsScreen(
     listState: androidx.compose.foundation.lazy.LazyListState,
     allApps: List<AppRow>,
     iconsByPkg: Map<String, ImageBitmap>,
+    loading: Boolean,
     query: String,
     onQueryChange: (String) -> Unit,
     onOpenApp: (String) -> Unit,
@@ -1182,43 +1324,49 @@ private fun AppsScreen(
         Spacer(modifier = Modifier.height(12.dp))
 
         // 滚动状态由上层传入:进入任务页/规则页返回后恢复上一次滚动位置
-        Box(modifier = Modifier.fillMaxSize()) {
-        LazyColumn(
-            state = listState,
-            modifier = Modifier.fillMaxSize(),
-            contentPadding = PaddingValues(start = 16.dp, end = 16.dp, bottom = 12.dp),
-            verticalArrangement = Arrangement.spacedBy(8.dp),
-        ) {
-            if (visibleApps.isEmpty()) {
-                item {
-                    Text(
-                        text = if (query.isBlank()) "未找到任何应用" else "无匹配应用",
-                        style = MaterialTheme.typography.bodySmall,
-                        color = MaterialTheme.colorScheme.onSurfaceVariant,
-                    )
-                }
+        when {
+            loading -> CenteredPlaceholder {
+                AppsLoadingIcon()
+                Spacer(modifier = Modifier.height(16.dp))
+                Text("正在加载应用列表…", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
             }
-
-            items(visibleApps.size, key = { visibleApps[it].packageName }, contentType = { "app" }) { i ->
-                val app = visibleApps[i]
-                AppListCard(
-                    app = app,
-                    icon = iconsByPkg[app.packageName],
-                    blocked = netBlockedPkgs.contains(app.packageName),
-                    onClick = { onOpenApp(app.packageName) },
-                    onLongClick = { infoSheetPkg = app.packageName },
-                    onToggleNetwork = { target ->
-                        onNetworkBlocked(app.packageName, target)
-                    },
+            visibleApps.isEmpty() -> CenteredPlaceholder {
+                AppsEmptyIcon(searching = query.isNotBlank())
+                Spacer(modifier = Modifier.height(16.dp))
+                Text(
+                    text = if (query.isBlank()) "未找到任何应用" else "无匹配应用",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
                 )
             }
-        }
-        // 快速滑动条:覆盖在列表右侧,拖动跳转
-        FastScrollbar(
-            listState = listState,
-            itemCount = visibleApps.size,
-            modifier = Modifier.align(Alignment.CenterEnd),
-        )
+            else -> Box(modifier = Modifier.fillMaxSize()) {
+                LazyColumn(
+                    state = listState,
+                    modifier = Modifier.fillMaxSize(),
+                    contentPadding = PaddingValues(start = 16.dp, end = 16.dp, bottom = 12.dp),
+                    verticalArrangement = Arrangement.spacedBy(8.dp),
+                ) {
+                    items(visibleApps.size, key = { visibleApps[it].packageName }, contentType = { "app" }) { i ->
+                        val app = visibleApps[i]
+                        AppListCard(
+                            app = app,
+                            icon = iconsByPkg[app.packageName],
+                            blocked = netBlockedPkgs.contains(app.packageName),
+                            onClick = { onOpenApp(app.packageName) },
+                            onLongClick = { infoSheetPkg = app.packageName },
+                            onToggleNetwork = { target ->
+                                onNetworkBlocked(app.packageName, target)
+                            },
+                        )
+                    }
+                }
+                // 快速滑动条:覆盖在列表右侧,拖动跳转
+                FastScrollbar(
+                    listState = listState,
+                    itemCount = visibleApps.size,
+                    modifier = Modifier.align(Alignment.CenterEnd),
+                )
+            }
         }
     }
 
@@ -1314,14 +1462,33 @@ private fun AppListCard(
             Spacer(modifier = Modifier.width(12.dp))
             // 名称 + 包名/规则数
             Column(modifier = Modifier.weight(1f).padding(end = 10.dp)) {
-                Text(
-                    text = app.label,
-                    style = MaterialTheme.typography.titleSmall,
-                    fontWeight = FontWeight.SemiBold,
-                    color = if (app.installed) scheme.onSurface else scheme.outline,
-                    maxLines = 1,
-                    overflow = TextOverflow.Ellipsis,
-                )
+                Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+                    Text(
+                        text = app.label,
+                        style = MaterialTheme.typography.titleSmall,
+                        fontWeight = FontWeight.SemiBold,
+                        color = if (app.installed) scheme.onSurface else scheme.outline,
+                        maxLines = 1,
+                        overflow = TextOverflow.Ellipsis,
+                    )
+                    // 版本号标签:紧跟应用名同行;空间不足时优先截断版本号尾部,应用名不截断
+                    if (app.version.isNotEmpty()) {
+                        Surface(
+                            color = scheme.surfaceVariant.copy(alpha = 0.7f),
+                            contentColor = scheme.onSurfaceVariant,
+                            shape = CircleShape,
+                            modifier = Modifier.weight(1f, fill = false),
+                        ) {
+                            Text(
+                                text = "v${app.version}",
+                                style = MaterialTheme.typography.labelSmall,
+                                maxLines = 1,
+                                overflow = TextOverflow.Ellipsis,
+                                modifier = Modifier.padding(horizontal = 6.dp, vertical = 1.dp),
+                            )
+                        }
+                    }
+                }
                 Spacer(modifier = Modifier.height(2.dp))
                 Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(5.dp)) {
                     if (app.taskCount > 0) {
@@ -1909,6 +2076,567 @@ private fun AllRulesPage(
     }
 }
 
+/** 分区步骤项:分区 id + 标题 + 描述 + 图标(步骤头 / 底部步骤轨共用) */
+private data class EditorSectionItem(
+    val id: String,
+    val title: String,
+    val desc: String,
+    val icon: ImageVector,
+)
+
+/** 手风琴分组卡:可折叠分组(圆形图标 + 标题/描述 + 旋转箭头),展开显示正文 */
+@Composable
+private fun EditorAccordion(
+    item: EditorSectionItem,
+    expanded: Boolean,
+    hasError: Boolean,
+    onToggle: () -> Unit,
+    content: @Composable () -> Unit,
+) {
+    val cs = MaterialTheme.colorScheme
+    val arrowRotation by animateFloatAsState(
+        targetValue = if (expanded) 180f else 0f,
+        animationSpec = spring(dampingRatio = 0.6f, stiffness = 400f),
+    )
+    Card(
+        modifier = Modifier.fillMaxWidth(),
+        colors = CardDefaults.cardColors(
+            containerColor = when {
+                hasError -> cs.errorContainer.copy(alpha = 0.25f)
+                expanded -> cs.primaryContainer.copy(alpha = 0.3f)
+                else -> cs.surfaceVariant.copy(alpha = 0.25f)
+            },
+        ),
+        shape = MaterialTheme.shapes.extraLarge,
+        elevation = CardDefaults.cardElevation(
+            defaultElevation = 0.dp,
+        ),
+    ) {
+        Column {
+            Row(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .clickable { onToggle() }
+                    .padding(start = 16.dp, end = 8.dp, top = 14.dp, bottom = 14.dp),
+                verticalAlignment = Alignment.CenterVertically,
+            ) {
+                Box(
+                    modifier = Modifier
+                        .size(40.dp)
+                        .clip(CircleShape)
+                        .background(
+                            if (hasError) cs.errorContainer
+                            else if (expanded) cs.primary else cs.secondaryContainer,
+                        ),
+                    contentAlignment = Alignment.Center,
+                ) {
+                    Icon(
+                        imageVector = item.icon,
+                        contentDescription = null,
+                        tint = if (hasError) cs.onError
+                        else if (expanded) cs.onPrimary else cs.onSecondaryContainer,
+                        modifier = Modifier.size(20.dp),
+                    )
+                }
+                Spacer(Modifier.width(12.dp))
+                Column(modifier = Modifier.weight(1f)) {
+                    Text(
+                        text = item.title,
+                        style = MaterialTheme.typography.titleMedium,
+                        fontWeight = FontWeight.SemiBold,
+                    )
+                    Text(
+                        text = item.desc,
+                        style = MaterialTheme.typography.bodySmall,
+                        color = cs.onSurfaceVariant,
+                    )
+                }
+                if (hasError) {
+                    Icon(
+                        imageVector = Icons.Filled.Error,
+                        contentDescription = null,
+                        tint = cs.error,
+                        modifier = Modifier
+                            .size(16.dp)
+                            .padding(end = 4.dp),
+                    )
+                }
+                Icon(
+                    imageVector = Icons.Filled.ExpandMore,
+                    contentDescription = null,
+                    tint = cs.onSurfaceVariant,
+                    modifier = Modifier
+                        .size(22.dp)
+                        .padding(end = 4.dp)
+                        .rotate(arrowRotation),
+                )
+            }
+            AnimatedVisibility(
+                visible = expanded,
+                enter = expandVertically(tween(200)),
+                exit = shrinkVertically(tween(200)),
+            ) {
+                Column(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .padding(start = 16.dp, end = 16.dp, top = 4.dp, bottom = 16.dp),
+                    verticalArrangement = Arrangement.spacedBy(12.dp),
+                ) {
+                    content()
+                }
+            }
+        }
+    }
+}
+@Composable
+private fun ExprField(
+    value: String,
+    onChange: (String) -> Unit,
+    title: String,
+    note: String? = null,
+    singleLine: Boolean = false,
+    numeric: Boolean = false,
+    allowMinus: Boolean = false,
+    maxLines: Int = 4,
+    monospace: Boolean = false,
+    error: String? = null,
+) {
+    val cs = MaterialTheme.colorScheme
+    val isError = error != null
+    Column(
+        modifier = Modifier
+            .fillMaxWidth()
+            .animateContentSize(),
+        verticalArrangement = Arrangement.spacedBy(6.dp),
+    ) {
+        Text(
+            text = title,
+            style = MaterialTheme.typography.labelMedium,
+            color = if (isError) cs.error else cs.onSurfaceVariant,
+        )
+        Row(
+            modifier = Modifier
+                .fillMaxWidth()
+                .clip(RoundedCornerShape(12.dp))
+                .background(
+                    if (isError) cs.errorContainer.copy(alpha = 0.35f)
+                    else cs.surfaceVariant.copy(alpha = 0.4f),
+                )
+                .padding(start = 16.dp, end = 4.dp, top = 10.dp, bottom = 10.dp),
+            verticalAlignment = Alignment.CenterVertically,
+        ) {
+            BasicTextField(
+                value = value,
+                onValueChange = if (numeric) {
+                    { onChange(it.filter { c -> c.isDigit() || (allowMinus && c == '-') }) }
+                } else onChange,
+                modifier = Modifier.weight(1f),
+                textStyle = MaterialTheme.typography.bodyLarge.copy(
+                    color = cs.onSurface,
+                    fontFamily = if (monospace) FontFamily.Monospace else FontFamily.Default,
+                ),
+                minLines = if (singleLine) 1 else maxLines,
+                maxLines = if (singleLine) 1 else maxLines,
+            )
+            if (value.isNotEmpty()) {
+                Box(
+                    modifier = Modifier
+                        .size(26.dp)
+                        .clip(CircleShape)
+                        .clickable { onChange("") },
+                    contentAlignment = Alignment.Center,
+                ) {
+                    Icon(
+                        imageVector = Icons.Filled.Cancel,
+                        contentDescription = "清空",
+                        tint = cs.onSurfaceVariant,
+                        modifier = Modifier.size(18.dp),
+                    )
+                }
+            } else {
+                // 占位保持高度一致(有/无清空按钮时输入框高度不变)
+                Spacer(Modifier.size(26.dp))
+            }
+        }
+        if (isError) {
+            Row(
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.spacedBy(6.dp),
+            ) {
+                Icon(
+                    imageVector = Icons.Filled.Error,
+                    contentDescription = null,
+                    tint = cs.error,
+                    modifier = Modifier.size(14.dp),
+                )
+                Text(
+                    text = error.orEmpty(),
+                    style = MaterialTheme.typography.bodySmall,
+                    color = cs.error,
+                )
+            }
+        }
+        if (note != null) InfoNote(note)
+    }
+}
+
+/** 说明条:Info 图标 + 正文,承载所有原 hint/supporting 文案(Expressive:圆点标记,无填充) */
+@Composable
+private fun InfoNote(text: String) {
+    val cs = MaterialTheme.colorScheme
+    Row(
+        modifier = Modifier.fillMaxWidth(),
+        verticalAlignment = Alignment.Top,
+        horizontalArrangement = Arrangement.spacedBy(6.dp),
+    ) {
+        Icon(
+            imageVector = Icons.Filled.Info,
+            contentDescription = null,
+            tint = cs.primary,
+            modifier = Modifier
+                .size(15.dp)
+                .padding(top = 1.dp),
+        )
+        Text(
+            text = text,
+            style = MaterialTheme.typography.bodySmall,
+            color = cs.onSurfaceVariant,
+        )
+    }
+}
+
+/** 可点按选项卡:选中 = 柔和容器色填充 + 主色对勾,未选 = 描边(Expressive 标准 chip 形态) */
+@Composable
+private fun ChoiceChip(
+    selected: Boolean,
+    onClick: () -> Unit,
+    label: String,
+) {
+    val cs = MaterialTheme.colorScheme
+    Surface(
+        onClick = onClick,
+        shape = RoundedCornerShape(999.dp),
+        color = if (selected) cs.primaryContainer else cs.surfaceVariant.copy(alpha = 0.45f),
+        contentColor = if (selected) cs.onPrimaryContainer else cs.onSurfaceVariant,
+    ) {
+        Text(
+            text = label,
+            style = MaterialTheme.typography.labelMedium,
+            fontWeight = if (selected) FontWeight.SemiBold else FontWeight.Normal,
+            maxLines = 1,
+            softWrap = false,
+            textAlign = TextAlign.Center,
+            modifier = Modifier.padding(horizontal = 14.dp, vertical = 9.dp),
+        )
+    }
+}
+
+/** 开关行:标签 + 说明 + 开关,整行可点(无背景填充,仅底部细分隔线) */
+@Composable
+private fun SwitchRow(
+    checked: Boolean,
+    onCheckedChange: (Boolean) -> Unit,
+    label: String,
+    desc: String? = null,
+) {
+    val cs = MaterialTheme.colorScheme
+    Column(modifier = Modifier.fillMaxWidth()) {
+        Row(
+            modifier = Modifier
+                .fillMaxWidth()
+                .clip(RoundedCornerShape(12.dp))
+                .clickable { onCheckedChange(!checked) }
+                .padding(vertical = 10.dp),
+            verticalAlignment = Alignment.CenterVertically,
+        ) {
+            Column(modifier = Modifier.weight(1f)) {
+                Text(
+                    text = label,
+                    style = MaterialTheme.typography.titleSmall,
+                    fontWeight = FontWeight.SemiBold,
+                )
+                if (desc != null) {
+                    Text(
+                        text = desc,
+                        style = MaterialTheme.typography.bodySmall,
+                        color = cs.onSurfaceVariant,
+                    )
+                }
+            }
+            Spacer(Modifier.width(10.dp))
+            Switch(
+                checked = checked,
+                onCheckedChange = onCheckedChange,
+            )
+        }
+        HorizontalDivider(color = cs.outlineVariant.copy(alpha = 0.4f))
+    }
+}
+
+/** 分区内小分组标题(调度与限频 / 时间窗 等):主色圆点 + 标题 + 尾部细线 */
+@Composable
+private fun SubSectionTitle(text: String) {
+    val cs = MaterialTheme.colorScheme
+    Row(
+        verticalAlignment = Alignment.CenterVertically,
+        horizontalArrangement = Arrangement.spacedBy(8.dp),
+    ) {
+        Box(
+            modifier = Modifier
+                .size(8.dp)
+                .clip(CircleShape)
+                .background(cs.primary),
+        )
+        Text(
+            text = text,
+            style = MaterialTheme.typography.labelLarge,
+            fontWeight = FontWeight.SemiBold,
+            color = cs.onSurface,
+        )
+        Box(
+            modifier = Modifier
+                .weight(1f)
+                .height(1.dp)
+                .background(cs.outlineVariant.copy(alpha = 0.5f)),
+        )
+    }
+}
+
+/** 场景流步骤卡:折叠行 + 展开编辑区,可上移/下移/删除 */
+@Composable
+private fun StepCard(
+    index: Int,
+    totalSteps: Int,
+    draft: StepDraft,
+    expanded: Boolean,
+    onToggle: () -> Unit,
+    onMoveUp: () -> Unit,
+    onMoveDown: () -> Unit,
+    onDelete: () -> Unit,
+    onChange: (StepDraft) -> Unit,
+) {
+    // 本步选择器逐行校验,错误显示在输入块下方
+    val matchesError = draft.matchesText.lines()
+        .mapIndexedNotNull { idx, line ->
+            val t = line.trim()
+            if (t.isEmpty() || t.startsWith("//")) null
+            else runCatching { GkdSelector.parse(t) }.exceptionOrNull()?.let { "第 ${idx + 1} 行: ${it.message}" }
+        }.firstOrNull()
+    val cs = MaterialTheme.colorScheme
+    // 展开箭头旋转动画(180°)
+    val arrowRotation by animateFloatAsState(
+        targetValue = if (expanded) 180f else 0f,
+        animationSpec = spring(dampingRatio = 0.55f, stiffness = 400f),
+    )
+    Card(
+        modifier = Modifier
+            .fillMaxWidth(),
+        colors = CardDefaults.cardColors(
+            containerColor = if (expanded) cs.primaryContainer.copy(alpha = 0.35f)
+            else cs.surfaceVariant.copy(alpha = 0.3f),
+        ),
+        shape = MaterialTheme.shapes.extraLarge,
+        elevation = CardDefaults.cardElevation(
+            defaultElevation = 0.dp,
+        ),
+    ) {
+        Column {
+            Row(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .clickable { onToggle() }
+                    .padding(start = 16.dp, end = 8.dp, top = 14.dp, bottom = 14.dp),
+                verticalAlignment = Alignment.CenterVertically,
+            ) {
+                Box(
+                    modifier = Modifier
+                        .size(30.dp)
+                        .clip(CircleShape)
+                        .background(if (expanded) cs.primary else cs.secondaryContainer),
+                    contentAlignment = Alignment.Center,
+                ) {
+                    Text(
+                        text = "${index + 1}",
+                        style = MaterialTheme.typography.labelSmall,
+                        color = if (expanded) cs.onPrimary else cs.onSecondaryContainer,
+                        fontWeight = FontWeight.Bold,
+                        fontFamily = FontFamily.Monospace,
+                    )
+                }
+                Spacer(Modifier.width(12.dp))
+                Column(modifier = Modifier.weight(1f)) {
+                    Text(
+                        text = draft.name.ifEmpty { "步骤${index + 1}" },
+                        style = MaterialTheme.typography.titleSmall,
+                        fontWeight = FontWeight.SemiBold,
+                        maxLines = 1,
+                        overflow = TextOverflow.Ellipsis,
+                    )
+                    Text(
+                        text = buildString {
+                            append(GKD_ACTION_LABELS[draft.actionKind] ?: draft.actionKind)
+                            val wt = draft.waitTimeoutText.toLongOrNull() ?: 0L
+                            if (wt > 0) append(" · 等 ${wt / 1000}s")
+                            if (draft.triggerOnAbsent) append(" · 反向")
+                        },
+                        style = MaterialTheme.typography.labelSmall,
+                        color = cs.onSurfaceVariant,
+                    )
+                }
+                Icon(
+                    imageVector = Icons.Filled.KeyboardArrowDown,
+                    contentDescription = null,
+                    tint = if (expanded) cs.primary else cs.onSurfaceVariant,
+                    modifier = Modifier
+                        .size(22.dp)
+                        .rotate(arrowRotation),
+                )
+            }
+            if (expanded) {
+                Column(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .padding(horizontal = 16.dp, vertical = 4.dp)
+                        .padding(bottom = 14.dp),
+                    verticalArrangement = Arrangement.spacedBy(12.dp),
+                ) {
+                    HorizontalDivider(color = cs.outlineVariant.copy(alpha = 0.5f))
+                    ExprField(
+                        value = draft.name,
+                        onChange = { v -> onChange(draft.copy(name = v)) },
+                        title = "步骤名(可选)",
+                        singleLine = true,
+                    )
+                    ExprField(
+                        value = draft.matchesText,
+                        onChange = { v -> onChange(draft.copy(matchesText = v)) },
+                        title = "选择器(每行一条,全部命中;留空 = 无条件步)",
+                        note = "例: [text*=\"同意\"][clickable=true]",
+                        monospace = true,
+                        maxLines = 4,
+                        error = matchesError,
+                    )
+                    Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
+                        Text(
+                            text = "动作",
+                            style = MaterialTheme.typography.labelMedium,
+                            color = cs.onSurfaceVariant,
+                        )
+                        FlowRow(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                            Action.entries.forEach { a ->
+                                ChoiceChip(
+                                    selected = draft.actionKind == a.gkd,
+                                    onClick = { onChange(draft.copy(actionKind = a.gkd)) },
+                                    label = GKD_ACTION_LABELS[a.gkd] ?: a.gkd,
+                                )
+                            }
+                        }
+                    }
+                    ExprField(
+                        value = draft.waitTimeoutText,
+                        onChange = { v -> onChange(draft.copy(waitTimeoutText = v)) },
+                        title = "等待目标出现超时 ms(0 = 只查当帧)",
+                        singleLine = true,
+                        numeric = true,
+                    )
+                    ExprField(
+                        value = draft.settleTimeText,
+                        onChange = { v -> onChange(draft.copy(settleTimeText = v)) },
+                        title = "目标出现后稳定等待 ms(防动画中点空)",
+                        singleLine = true,
+                        numeric = true,
+                    )
+                    SwitchRow(
+                        checked = draft.triggerOnAbsent,
+                        onCheckedChange = { v -> onChange(draft.copy(triggerOnAbsent = v)) },
+                        label = "反向触发",
+                        desc = "节点消失后执行(仅返回/滑动/坐标类动作有效)",
+                    )
+                    SwitchRow(
+                        checked = draft.skipOnTimeout,
+                        onCheckedChange = { v -> onChange(draft.copy(skipOnTimeout = v)) },
+                        label = "超时跳过",
+                        desc = "关闭 = 超时终止整个流",
+                    )
+                    Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                        OutlinedButton(onClick = onMoveUp, enabled = index > 0) { Text("上移") }
+                        OutlinedButton(onClick = onMoveDown, enabled = index < totalSteps - 1) { Text("下移") }
+                        OutlinedButton(
+                            onClick = onDelete,
+                            colors = ButtonDefaults.outlinedButtonColors(
+                                contentColor = cs.error,
+                            ),
+                        ) { Text("删除") }
+                    }
+                }
+            }
+        }
+    }
+}
+
+/** 模式选择大卡:单步规则 / 多步骤场景流二选一(Expressive:大圆角 + 主色圆形图标容器) */
+@Composable
+private fun ModeOptionCard(
+    selected: Boolean,
+    onClick: () -> Unit,
+    title: String,
+    desc: String,
+    icon: ImageVector,
+) {
+    val cs = MaterialTheme.colorScheme
+    Surface(
+        onClick = onClick,
+        shape = MaterialTheme.shapes.extraLarge,
+        color = if (selected) cs.primaryContainer else cs.surfaceVariant.copy(alpha = 0.35f),
+        contentColor = if (selected) cs.onPrimaryContainer else cs.onSurface,
+        modifier = Modifier.fillMaxWidth(),
+    ) {
+        Row(
+            modifier = Modifier
+                .padding(horizontal = 16.dp, vertical = 16.dp)
+                .animateContentSize(),
+            verticalAlignment = Alignment.CenterVertically,
+            horizontalArrangement = Arrangement.spacedBy(14.dp),
+        ) {
+            Box(
+                modifier = Modifier
+                    .size(44.dp)
+                    .clip(CircleShape)
+                    .background(
+                        if (selected) cs.primary else cs.surfaceVariant.copy(alpha = 0.6f),
+                    ),
+                contentAlignment = Alignment.Center,
+            ) {
+                Icon(
+                    imageVector = icon,
+                    contentDescription = null,
+                    tint = if (selected) cs.onPrimary else cs.onSurfaceVariant,
+                    modifier = Modifier.size(24.dp),
+                )
+            }
+            Column(modifier = Modifier.weight(1f)) {
+                Text(
+                    text = title,
+                    style = MaterialTheme.typography.titleSmall,
+                    fontWeight = FontWeight.Bold,
+                )
+                Text(
+                    text = desc,
+                    style = MaterialTheme.typography.bodySmall,
+                    color = if (selected) cs.onPrimaryContainer.copy(alpha = 0.8f)
+                    else cs.onSurfaceVariant,
+                )
+            }
+            Icon(
+                imageVector = if (selected) Icons.Filled.RadioButtonChecked else Icons.Filled.RadioButtonUnchecked,
+                contentDescription = null,
+                tint = if (selected) cs.primary else cs.outline,
+                modifier = Modifier.size(22.dp),
+            )
+        }
+    }
+}
+
 /** 规则页分组标题行:名称 + 条数 + 展开箭头,点按切换折叠 */
 @Composable
 private fun SectionHeader(
@@ -2481,6 +3209,9 @@ private fun LogsScreen(modifier: Modifier = Modifier) {
     // 详情弹窗:展示完整日志文本,一键复制
     var detailText by remember { mutableStateOf<String?>(null) }
     val context = androidx.compose.ui.platform.LocalContext.current
+    // 打印开关持久化:关闭后引擎不再写入日志
+    val prefs = remember { context.getSharedPreferences("logs_ui", android.content.Context.MODE_PRIVATE) }
+    var enabled by remember { mutableStateOf(prefs.getBoolean("log_enabled", true)) }
 
     DisposableEffect(Unit) {
         val unsubscribe = LogStore.observe { logs = it }
@@ -2515,9 +3246,51 @@ private fun LogsScreen(modifier: Modifier = Modifier) {
                     color = MaterialTheme.colorScheme.onSurfaceVariant,
                 )
             }
-            TextButton(onClick = { LogStore.clear() }) {
-                Text("清空", color = MaterialTheme.colorScheme.error)
+            // 打印开关:关闭后不再记录新日志
+            Row(
+                verticalAlignment = Alignment.CenterVertically,
+                modifier = Modifier.clip(MaterialTheme.shapes.small),
+            ) {
+                Text(
+                    text = "记录",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
+                Switch(
+                    checked = enabled,
+                    onCheckedChange = {
+                        enabled = it
+                        LogStore.enabled = it
+                        prefs.edit().putBoolean("log_enabled", it).apply()
+                    },
+                    modifier = Modifier.padding(start = 4.dp),
+                )
             }
+            // 清空:浅错误色圆盘 + 细叉,柔和不刺眼
+            IconButton(onClick = { LogStore.clear() }) {
+                Box(
+                    modifier = Modifier
+                        .size(30.dp)
+                        .clip(CircleShape)
+                        .background(MaterialTheme.colorScheme.error.copy(alpha = 0.12f)),
+                    contentAlignment = Alignment.Center,
+                ) {
+                    Icon(
+                        imageVector = Icons.Filled.Close,
+                        contentDescription = "清空日志",
+                        tint = MaterialTheme.colorScheme.error,
+                        modifier = Modifier.size(16.dp),
+                    )
+                }
+            }
+        }
+        if (!enabled) {
+            Text(
+                text = "记录已关闭,新的执行不会写入日志。",
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                modifier = Modifier.padding(horizontal = 16.dp),
+            )
         }
 
         if (logs.isEmpty()) {
@@ -2624,7 +3397,75 @@ private val GKD_ACTION_LABELS = mapOf(
     "none" to "仅标记",
 )
 
+/** 规则编辑器实时校验:分区(sectionId)→ 错误消息列表 */
+private data class EditorValidation(
+    val ok: Boolean,
+    val errors: Map<String, List<String>>,
+)
+
+/** 多行 GKD 选择器列表解析(跳过空行与 // 注释,坏行静默丢弃) */
+private fun parseSelectorList(text: String): List<GkdSelector> =
+    text.lines()
+        .map { it.trim() }
+        .filter { it.isNotEmpty() && !it.startsWith("//") }
+        .mapNotNull { runCatching { GkdSelector.parse(it) }.getOrNull() }
+
+/** 位置表达式解析: left=…,top=…,x=…;返回 (位置, 错误消息) */
+private fun parsePositionExpr(text: String): Pair<GkdTask.Position?, String?> {
+    val t = text.trim()
+    if (t.isEmpty()) return null to null
+    var p = GkdTask.Position()
+    t.split(',', '，').map { it.trim() }.filter { it.isNotEmpty() }.forEach { kv ->
+        val (k, v) = kv.split('=', limit = 2).map { it.trim() }
+        p = when (k) {
+            "left" -> p.copy(left = v); "top" -> p.copy(top = v)
+            "right" -> p.copy(right = v); "bottom" -> p.copy(bottom = v)
+            "x" -> p.copy(x = v); "y" -> p.copy(y = v)
+            else -> p
+        }
+    }
+    if (!p.isValid) return null to "position 无有效坐标字段,示例: left=width/2,top=height/2"
+    return p to null
+}
+
+/** swipeArg 表达式解析: start(…),end(…),duration=…;返回 (滑动参数, 错误消息) */
+private fun parseSwipeArgExpr(text: String): Pair<GkdTask.SwipeArg?, String?> {
+    val t = text.trim()
+    if (t.isEmpty()) return null to null
+    var start = GkdTask.Position()
+    var end: GkdTask.Position? = null
+    var duration = 300L
+    Regex("start\\(([^)]*)\\)").find(t)?.let { m ->
+        m.groupValues[1].split(',', '，').map { it.trim() }.filter { it.isNotEmpty() }
+            .forEach { kv ->
+                val (k, v) = kv.split('=', limit = 2).map { it.trim() }
+                start = when (k) {
+                    "left" -> start.copy(left = v); "top" -> start.copy(top = v)
+                    "x" -> start.copy(x = v); "y" -> start.copy(y = v)
+                    else -> start
+                }
+            }
+    }
+    Regex("end\\(([^)]*)\\)").find(t)?.let { m ->
+        var e = GkdTask.Position()
+        m.groupValues[1].split(',', '，').map { it.trim() }.filter { it.isNotEmpty() }
+            .forEach { kv ->
+                val (k, v) = kv.split('=', limit = 2).map { it.trim() }
+                e = when (k) {
+                    "left" -> e.copy(left = v); "top" -> e.copy(top = v)
+                    "x" -> e.copy(x = v); "y" -> e.copy(y = v)
+                    else -> e
+                }
+            }
+        end = e
+    }
+    Regex("duration=(\\d+)").find(t)?.let { duration = it.groupValues[1].toLong() }
+    if (!start.isValid) return null to "swipeArg 错误: start 缺少 x/y 定位字段(示例: start(x=screenWidth/2,y=screenHeight*0.8))"
+    return GkdTask.SwipeArg(start = start, end = end?.takeIf { it.isValid }, duration = duration) to null
+}
+
 @Composable
+@OptIn(ExperimentalFoundationApi::class)
 private fun RuleEditorPage(
     pkg: String,
     existing: GkdTask?,
@@ -2664,11 +3505,14 @@ private fun RuleEditorPage(
     }
     var fastQueryOn by remember { mutableStateOf(rule0?.fastQuery ?: existing?.fastQuery ?: false) }
     var matchRootOn by remember { mutableStateOf(rule0?.matchRoot ?: existing?.matchRoot ?: false) }
+    // 本地扩展:反向触发(节点不存在时执行动作),不导出 GKD 订阅
+    var triggerOnAbsentOn by remember { mutableStateOf(rule0?.triggerOnAbsent ?: false) }
+    // 触发事件类型(手动选哪些 AccessibilityEvent 触发评估);空 = 仅窗口状态变化
+    var selectedEventTypes by remember { mutableStateOf(rule0?.eventTypes?.toSet() ?: emptySet()) }
     var orderText by remember {
         mutableStateOf(rule0?.order?.takeIf { it != 0L }?.toString()
             ?: existing?.order?.takeIf { it != 0L }?.toString().orEmpty())
     }
-    var showAdvanced by remember { mutableStateOf(false) }
     // 自定义坐标 / 滑动:swipe 动作的补充参数
     var positionText by remember {
         mutableStateOf(rule0?.position?.let { p ->
@@ -2714,636 +3558,593 @@ private fun RuleEditorPage(
                     waitTimeoutText = s.waitTimeout.toString(),
                     settleTimeText = s.settleTime.toString(),
                     skipOnTimeout = s.onTimeout == GkdTask.Step.TimeoutPolicy.Continue,
+                    triggerOnAbsent = s.triggerOnAbsent,
                 )
             } ?: emptyList(),
         )
     }
     var editingStepIdx by remember { mutableStateOf<Int?>(null) }
+    // 单页手风琴:当前展开的分组 id(单步规则下多个分组可同时展开,场景流下默认步骤组)
+    var expandedSections by remember { mutableStateOf(setOf("mode", "basic", if (existing?.steps?.isNotEmpty() == true) "steps" else "trigger", "action")) }
+    // 分区列表:场景流/单步规则两种模式分组集不同
+    val sections = remember(stepMode) {
+        if (stepMode) listOf(
+            EditorSectionItem("mode", "模式", "单步规则 / 场景流", Icons.Filled.ExpandMore),
+            EditorSectionItem("basic", "基本信息", "任务名与生效范围", Icons.AutoMirrored.Filled.ListAlt),
+            EditorSectionItem("steps", "场景流步骤", "按序执行", Icons.Filled.PlayCircle),
+        ) else listOf(
+            EditorSectionItem("mode", "模式", "单步规则 / 场景流", Icons.Filled.ExpandMore),
+            EditorSectionItem("basic", "基本信息", "任务名与生效范围", Icons.AutoMirrored.Filled.ListAlt),
+            EditorSectionItem("trigger", "触发条件", "何时评估 + 命中节点", Icons.AutoMirrored.Filled.Rule),
+            EditorSectionItem("action", "动作", "命中后执行什么", Icons.Filled.TouchApp),
+            EditorSectionItem("advanced", "高级参数", "冷却 / 时间窗 / 重置", Icons.Filled.Tune),
+        )
+    }
+    // 摘要文本(顶部标题栏副标题)
+    val summaryAction = GKD_ACTION_LABELS[actionKind] ?: actionKind
+    val summaryTrigger = when {
+        stepMode -> "场景流 ${stepDrafts.size} 步"
+        actionKind == "back" -> "无选择器 · 立即执行"
+        else -> {
+            val n = parseSelectorList(matchesText).size + parseSelectorList(anyMatchesText).size
+            if (n > 0) "$n 条选择器" else "未填选择器"
+        }
+    }
+    // 实时校验:与 doSave 同规则,结果驱动概要卡状态与导航红点
+    fun validate(): EditorValidation {
+        val errors = LinkedHashMap<String, MutableList<String>>()
+        fun err(sec: String, msg: String) { errors.getOrPut(sec) { mutableListOf() } += msg }
+        if (stepMode) {
+            if (stepDrafts.isEmpty()) err("steps", "请至少添加一个步骤")
+            stepDrafts.forEachIndexed { idx, d ->
+                d.matchesText.lines().map { it.trim() }
+                    .filter { it.isNotEmpty() && !it.startsWith("//") }
+                    .forEach { expr ->
+                        runCatching { GkdSelector.parse(expr) }
+                            .exceptionOrNull()?.let { err("steps", "步骤${idx + 1} 选择器错误: ${it.message}") }
+                    }
+            }
+        } else {
+            listOf("matches" to matchesText, "anyMatches" to anyMatchesText,
+                "excludeMatches" to excludeMatchesText, "excludeAllMatches" to excludeAllMatchesText
+            ).forEach { (field, text) ->
+                text.lines().map { it.trim() }
+                    .filter { it.isNotEmpty() && !it.startsWith("//") }
+                    .forEach { expr ->
+                        runCatching { GkdSelector.parse(expr) }
+                            .exceptionOrNull()?.let { err("trigger", "$field 错误: ${it.message}") }
+                    }
+            }
+            val selCount = parseSelectorList(matchesText).size
+            val anyCount = parseSelectorList(anyMatchesText).size
+            if (selCount == 0 && anyCount == 0) err("trigger", "matches 与 anyMatches 至少填一个")
+            if (positionText.isNotBlank()) {
+                parsePositionExpr(positionText).second?.let { err("action", it) }
+            }
+            if (actionKind == "swipe" && swipeArgText.isNotBlank()) {
+                parseSwipeArgExpr(swipeArgText).second?.let { err("action", it) }
+            }
+        }
+        return EditorValidation(ok = errors.isEmpty(), errors = errors)
+    }
+    // 保存逻辑:校验通过才落盘并退出
+    fun doSave() {
+        val v = validate()
+        if (!v.ok) {
+            val firstSec = v.errors.keys.firstOrNull()
+            if (firstSec != null) {
+                Toast.makeText(context, v.errors[firstSec]!!.first(), Toast.LENGTH_LONG).show()
+            }
+            return
+        }
+        // 场景流:解析各步选择器为 GkdTask.Step,rules 留空由场景流驱动
+        if (stepMode) {
+            val parsed = stepDrafts.map { d ->
+                GkdTask.Step(
+                    name = d.name.trim(),
+                    matches = parseSelectorList(d.matchesText),
+                    action = Action.entries.firstOrNull { it.gkd == d.actionKind } ?: Action.Click,
+                    waitTimeout = d.waitTimeoutText.toLongOrNull() ?: 0L,
+                    settleTime = d.settleTimeText.toLongOrNull() ?: 0L,
+                    onTimeout = if (d.skipOnTimeout) GkdTask.Step.TimeoutPolicy.Continue
+                    else GkdTask.Step.TimeoutPolicy.Abort,
+                    triggerOnAbsent = d.triggerOnAbsent,
+                )
+            }
+            val saved = GkdTask(
+                id = existing?.id ?: "task_${System.currentTimeMillis()}",
+                name = name.trim().ifEmpty { "场景流" },
+                packageName = pkg,
+                activityIds = activityIdsText.lines()
+                    .map { it.trim() }.filter { it.isNotEmpty() },
+                enabled = existing?.enabled ?: false,
+                rules = emptyList(),
+                steps = parsed,
+            )
+            onSave(saved)
+            Toast.makeText(context, "场景流已保存(${parsed.size} 步)", Toast.LENGTH_SHORT).show()
+            return
+        }
+        // 单步规则:共享解析函数已保证表达式合法
+        val sel = parseSelectorList(matchesText)
+        val anySel = parseSelectorList(anyMatchesText)
+        val excludeSel = parseSelectorList(excludeMatchesText)
+        val excludeAllSel = parseSelectorList(excludeAllMatchesText)
+        val action: Action = Action.entries.firstOrNull { it.gkd == actionKind } ?: Action.Click
+        val max = (actionMax.toLongOrNull() ?: 1L).coerceAtLeast(1L)
+        val preKeys = preKeysText.split(',', '，', ' ')
+            .mapNotNull { it.trim().toLongOrNull() }
+        val position = parsePositionExpr(positionText).first
+        val swipeArg = if (actionKind == "swipe") parseSwipeArgExpr(swipeArgText).first else null
+        // swipe 方向编码:GKD 新版用 swipeArg;无绝对坐标时以 endY=-2 表示下滑,null=上滑
+        val rule = GkdTask.Rule(
+            key = rule0?.key ?: 0L,
+            name = name.trim(),
+            matches = sel,
+            anyMatches = anySel,
+            excludeMatches = excludeSel,
+            excludeAllMatches = excludeAllSel,
+            preKeys = preKeys,
+            action = action,
+            // 本地扩展 swipeDir:2 = 下滑;GKD 标准形态用 swipeArg 表达式
+            swipeDir = if (actionKind == "scrollBackward") 2 else null,
+            position = position,
+            swipeArg = swipeArg,
+            actionMaximum = max,
+            actionCd = actionCdText.toLongOrNull() ?: 0L,
+            actionDelay = actionDelayText.toLongOrNull() ?: 0L,
+            matchTime = matchTimeText.toLongOrNull() ?: 0L,
+            priorityTime = priorityTimeText.toLongOrNull() ?: 0L,
+            forcedTime = forcedTimeText.toLongOrNull() ?: 0L,
+            fastQuery = fastQueryOn,
+            matchRoot = matchRootOn,
+            triggerOnAbsent = triggerOnAbsentOn,
+            eventTypes = selectedEventTypes.toList(),
+            resetMatch = resetMatchKind,
+            order = orderText.toLongOrNull() ?: 0L,
+        )
+        val saved = GkdTask(
+            id = existing?.id ?: "task_${System.currentTimeMillis()}",
+            name = name.trim().ifEmpty { rule.name.ifEmpty { "规则${rule.key}" } },
+            packageName = pkg,
+            activityIds = activityIdsText.lines()
+                .map { it.trim() }.filter { it.isNotEmpty() },
+            // 本地新建规则也默认关闭,用户在任务页手动开启
+            enabled = existing?.enabled ?: false,
+            rules = listOf(rule),
+        )
+        onSave(saved)
+        Toast.makeText(context, "规则已保存", Toast.LENGTH_SHORT).show()
+    }
+
+    val validation = validate()
+
+    // 各分组正文内容(手风琴卡片引用)
+    @Composable
+    fun sectionBody(id: String) {
+        when (id) {
+            "mode" -> {
+                ModeOptionCard(
+                    selected = !stepMode,
+                    onClick = {
+                        stepMode = false
+                        expandedSections = expandedSections.minus("steps") + "trigger" + "action"
+                    },
+                    title = "单步规则",
+                    desc = "一个条件 + 一个动作",
+                    icon = Icons.AutoMirrored.Filled.Rule,
+                )
+                ModeOptionCard(
+                    selected = stepMode,
+                    onClick = {
+                        stepMode = true
+                        expandedSections = expandedSections.filter { it in setOf("mode", "basic", "steps") }.toSet()
+                    },
+                    title = "多步骤场景流",
+                    desc = "按序执行,适合多步操作场景",
+                    icon = Icons.Filled.PlayCircle,
+                )
+            }
+                "basic" -> {
+                        ExprField(
+                            value = name,
+                            onChange = { name = it },
+                            title = "任务名(可选)",
+                            note = "留空自动按规则内容命名",
+                            singleLine = true,
+                        )
+                        ExprField(
+                            value = activityIdsText,
+                            onChange = { activityIdsText = it },
+                            title = "activityIds(每行一个)",
+                            note = "留空 = 任意 Activity;限制规则只在指定 Activity 生效",
+                            maxLines = 4,
+                        )
+                    }
+                    "trigger" -> {
+                        ExprField(
+                            value = matchesText,
+                            onChange = { matchesText = it },
+                            title = "matches(GKD 选择器,全部命中;每行一条)",
+                            note = "例: [text*=\"跳过\"][clickable=true];动作目标 = 最后一行",
+                            monospace = true,
+                            maxLines = 4,
+                            error = validation.errors["trigger"]?.firstOrNull { it.startsWith("matches") },
+                        )
+                        ExprField(
+                            value = anyMatchesText,
+                            onChange = { anyMatchesText = it },
+                            title = "anyMatches(任一命中即可;每行一条)",
+                            note = "与 matches 二选一;都填时仍以 matches 为准",
+                            monospace = true,
+                            maxLines = 4,
+                            error = validation.errors["trigger"]?.firstOrNull { it.startsWith("anyMatches") },
+                        )
+                        // 常用选择器片段:点按插入到 matches 末尾
+                        Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                            Text(
+                                text = "选择器片段(点按插入 matches)",
+                                style = MaterialTheme.typography.labelMedium,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                            )
+                            Row(
+                                modifier = Modifier.horizontalScroll(rememberScrollState()),
+                                horizontalArrangement = Arrangement.spacedBy(8.dp),
+                            ) {
+                                SELECTOR_SNIPPETS.forEach { (label, snippet) ->
+                                    ChoiceChip(
+                                        selected = false,
+                                        onClick = {
+                                            matchesText = matchesText.trimEnd().let {
+                                                if (it.isEmpty()) snippet else "$it\n$snippet"
+                                            }
+                                        },
+                                        label = label,
+                                    )
+                                }
+                            }
+                        }
+                        ExprField(
+                            value = excludeMatchesText,
+                            onChange = { excludeMatchesText = it },
+                            title = "excludeMatches(存在一个命中即跳过本规则;每行一条)",
+                            note = "例: [vid=\"close_btn\"] 存在时不执行",
+                            monospace = true,
+                            maxLines = 4,
+                            error = validation.errors["trigger"]?.firstOrNull { it.startsWith("excludeMatches") },
+                        )
+                        ExprField(
+                            value = excludeAllMatchesText,
+                            onChange = { excludeAllMatchesText = it },
+                            title = "excludeAllMatches(全部命中才跳过本规则;每行一条)",
+                            note = "与 excludeMatches 的区别:AND 语义,全部存在才拦截",
+                            monospace = true,
+                            maxLines = 4,
+                            error = validation.errors["trigger"]?.firstOrNull { it.startsWith("excludeAllMatches") },
+                        )
+                        RuleTriggerSection(
+                            selectedTypes = selectedEventTypes,
+                            onTypesChange = { selectedEventTypes = it },
+                            onAbsent = triggerOnAbsentOn,
+                            onAbsentChange = { triggerOnAbsentOn = it },
+                        )
+                    }
+                    "action" -> {
+                        Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                            Text(
+                                text = "动作",
+                                style = MaterialTheme.typography.labelMedium,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                            )
+                            // GKD 全量动作:单行横向滚动 chip 组
+                            Row(
+                                modifier = Modifier.horizontalScroll(rememberScrollState()),
+                                horizontalArrangement = Arrangement.spacedBy(8.dp),
+                            ) {
+                                Action.entries.forEach { a ->
+                                    ChoiceChip(
+                                        selected = actionKind == a.gkd,
+                                        onClick = { actionKind = a.gkd },
+                                        label = GKD_ACTION_LABELS[a.gkd] ?: a.gkd,
+                                    )
+                                }
+                            }
+                        }
+                        // 该动作对选择器/参数的要求
+                        ACTION_HINTS[actionKind]?.let { hint -> InfoNote(hint) }
+                        ExprField(
+                            value = actionMax,
+                            onChange = { actionMax = it },
+                            title = "actionMaximum(执行次数)",
+                            singleLine = true,
+                            numeric = true,
+                        )
+                        ExprField(
+                            value = positionText,
+                            onChange = { positionText = it },
+                            title = "position(自定义点击坐标,可选)",
+                            note = "例: left=width/2,top=height/2(节点中心);变量 left/top/right/bottom/width/height/random/screenWidth/screenHeight;有 position 时 click/longClick 走坐标手势",
+                            maxLines = 4,
+                            error = validation.errors["action"]?.firstOrNull(),
+                        )
+                        if (actionKind == "swipe") {
+                            ExprField(
+                                value = swipeArgText,
+                                onChange = { swipeArgText = it },
+                                title = "swipeArg(滑动参数)",
+                                note = "例: start(x=screenWidth/2,y=screenHeight*0.8),end(…),duration=300;start 必填,end 缺省 = start,留空 = 整屏上滑",
+                                maxLines = 4,
+                                error = validation.errors["action"]?.getOrNull(1),
+                            )
+                        }
+                    }
+                    "advanced" -> {
+                        SubSectionTitle("调度与限频")
+                        ExprField(
+                            value = actionCdText,
+                            onChange = { actionCdText = it },
+                            title = "actionCd(冷却 ms)",
+                            note = "0 = 默认 1000",
+                            singleLine = true,
+                            numeric = true,
+                        )
+                        ExprField(
+                            value = actionDelayText,
+                            onChange = { actionDelayText = it },
+                            title = "actionDelay(延迟执行 ms)",
+                            note = "延迟后重新校验选择器",
+                            singleLine = true,
+                            numeric = true,
+                        )
+                        ExprField(
+                            value = orderText,
+                            onChange = { orderText = it },
+                            title = "order(匹配顺序)",
+                            note = "越小越先,可为负",
+                            singleLine = true,
+                            numeric = true,
+                            allowMinus = true,
+                        )
+                        ExprField(
+                            value = preKeysText,
+                            onChange = { preKeysText = it },
+                            title = "preKeys(前置规则 key,逗号分隔)",
+                            note = "须在 10s 内刚执行过",
+                            singleLine = true,
+                        )
+                        SubSectionTitle("时间窗")
+                        Row(
+                            modifier = Modifier.horizontalScroll(rememberScrollState()),
+                            horizontalArrangement = Arrangement.spacedBy(8.dp),
+                        ) {
+                            listOf("3000" to "3秒", "10000" to "10秒(推荐)", "0" to "不限").forEach { (v, label) ->
+                                ChoiceChip(
+                                    selected = matchTimeText == v,
+                                    onClick = { matchTimeText = v },
+                                    label = label,
+                                )
+                            }
+                        }
+                        ExprField(
+                            value = matchTimeText,
+                            onChange = { matchTimeText = it },
+                            title = "matchTime(匹配时间窗 ms)",
+                            note = "0 = 不限",
+                            singleLine = true,
+                            numeric = true,
+                        )
+                        ExprField(
+                            value = priorityTimeText,
+                            onChange = { priorityTimeText = it },
+                            title = "priorityTime(优先级窗 ms)",
+                            note = "窗内优先匹配并可打断普通规则",
+                            singleLine = true,
+                            numeric = true,
+                        )
+                        ExprField(
+                            value = forcedTimeText,
+                            onChange = { forcedTimeText = it },
+                            title = "forcedTime(主动轮询窗 ms)",
+                            note = "flutter/webview 不发界面事件时用",
+                            singleLine = true,
+                            numeric = true,
+                        )
+                        SubSectionTitle("其他")
+                        Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                            Text(
+                                text = "resetMatch(休眠重置策略)",
+                                style = MaterialTheme.typography.labelMedium,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                            )
+                            Row(
+                                modifier = Modifier.horizontalScroll(rememberScrollState()),
+                                horizontalArrangement = Arrangement.spacedBy(8.dp),
+                            ) {
+                                GkdTask.ResetMatch.entries.forEach { rm ->
+                                    ChoiceChip(
+                                        selected = resetMatchKind == rm,
+                                        onClick = { resetMatchKind = rm },
+                                        label = rm.gkd,
+                                    )
+                                }
+                            }
+                        }
+                        SwitchRow(
+                            checked = fastQueryOn,
+                            onCheckedChange = { fastQueryOn = it },
+                            label = "fastQuery",
+                            desc = "跳过无障碍缓存直接查询",
+                        )
+                        SwitchRow(
+                            checked = matchRootOn,
+                            onCheckedChange = { matchRootOn = it },
+                            label = "matchRoot",
+                            desc = "选择器从根节点开始匹配",
+                        )
+                        InfoNote("GKD 语义:matches 命中的节点即动作目标;back / swipe 为全局动作,无需选择器。")
+                    }
+                    "steps" -> {
+                        val updateDraft: (Int, (StepDraft) -> StepDraft) -> Unit = { i, transform ->
+                            stepDrafts = stepDrafts.mapIndexed { j, d -> if (j == i) transform(d) else d }
+                        }
+                        stepDrafts.forEachIndexed { idx, d ->
+                            StepCard(
+                                index = idx,
+                                totalSteps = stepDrafts.size,
+                                draft = d,
+                                expanded = editingStepIdx == idx,
+                                onToggle = { editingStepIdx = if (editingStepIdx == idx) null else idx },
+                                onMoveUp = {
+                                    stepDrafts = stepDrafts.toMutableList().apply { add(idx - 1, removeAt(idx)) }
+                                    editingStepIdx = idx - 1
+                                },
+                                onMoveDown = {
+                                    stepDrafts = stepDrafts.toMutableList().apply { add(idx + 1, removeAt(idx)) }
+                                    editingStepIdx = idx + 1
+                                },
+                                onDelete = {
+                                    stepDrafts = stepDrafts.filterIndexed { j, _ -> j != idx }
+                                    editingStepIdx = null
+                                },
+                                onChange = { updated -> updateDraft(idx) { updated } },
+                            )
+                        }
+                        // 添加步骤
+                        OutlinedButton(
+                            onClick = {
+                                stepDrafts = stepDrafts + StepDraft("", "", "click", "3000", "0", false, false)
+                                editingStepIdx = stepDrafts.size - 1
+                            },
+                            modifier = Modifier.fillMaxWidth(),
+                            shape = RoundedCornerShape(14.dp),
+                        ) {
+                            Icon(Icons.Filled.Add, contentDescription = null, modifier = Modifier.size(18.dp))
+                            Spacer(Modifier.width(6.dp))
+                            Text("添加步骤")
+                        }
+                        InfoNote("场景流由第一步的选择器触发;组内 rules 不参与独立调度。")
+                    }
+        }
+    }
 
     Column(modifier = modifier.fillMaxSize()) {
-        // 顶栏:强调色返回圆钮 + 标题 + 保存
+        // 顶栏:返回 + 标题/副标题 + 保存状态徽标
+        val cs = MaterialTheme.colorScheme
+        val topTitle = if (existing == null) "新建任务" else "编辑任务"
         Row(
             modifier = Modifier
                 .fillMaxWidth()
-                .padding(horizontal = 8.dp, vertical = 8.dp),
+                .background(cs.surface)
+                .padding(horizontal = 8.dp, vertical = 10.dp),
             verticalAlignment = Alignment.CenterVertically,
         ) {
             Surface(
                 onClick = onBack,
                 shape = CircleShape,
-                color = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.5f),
+                color = cs.surfaceVariant.copy(alpha = 0.5f),
                 modifier = Modifier.size(40.dp),
             ) {
                 Box(contentAlignment = Alignment.Center) {
-                    Icon(Icons.AutoMirrored.Filled.ArrowBack, contentDescription = "返回")
+                    Icon(
+                        Icons.AutoMirrored.Filled.ArrowBack,
+                        contentDescription = "返回",
+                    )
                 }
             }
-            Spacer(modifier = Modifier.width(12.dp))
+            Spacer(Modifier.width(14.dp))
             Column(modifier = Modifier.weight(1f)) {
                 Text(
-                    text = if (existing == null) "新建任务" else "编辑任务",
+                    text = topTitle,
                     style = MaterialTheme.typography.titleLarge,
                     fontWeight = FontWeight.Bold,
                 )
                 Text(
-                    text = pkg,
-                    style = MaterialTheme.typography.bodySmall,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    text = "$pkg · ${summaryAction} · $summaryTrigger",
+                    style = MaterialTheme.typography.labelSmall,
+                    color = cs.onSurfaceVariant,
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis,
                 )
             }
-            TextButton(
-                onClick = {
-                    // 步骤模式:解析各步选择器为 GkdTask.Step,rules 留空由场景流驱动
-                    if (stepMode) {
-                        val parsed = mutableListOf<GkdTask.Step>()
-                        for ((idx, d) in stepDrafts.withIndex()) {
-                            val sels = d.matchesText.lines()
-                                .map { it.trim() }
-                                .filter { it.isNotEmpty() && !it.startsWith("//") }
-                                .map { expr ->
-                                    runCatching { GkdSelector.parse(expr) }.getOrElse {
-                                        Toast.makeText(context, "步骤${idx + 1} 选择器语法错误: $expr", Toast.LENGTH_LONG).show()
-                                        return@TextButton
-                                    }
-                                }
-                            parsed += GkdTask.Step(
-                                name = d.name.trim(),
-                                matches = sels,
-                                action = Action.entries.firstOrNull { it.gkd == d.actionKind } ?: Action.Click,
-                                waitTimeout = d.waitTimeoutText.toLongOrNull() ?: 0L,
-                                settleTime = d.settleTimeText.toLongOrNull() ?: 0L,
-                                onTimeout = if (d.skipOnTimeout) GkdTask.Step.TimeoutPolicy.Continue
-                                else GkdTask.Step.TimeoutPolicy.Abort,
-                            )
-                        }
-                        if (parsed.isEmpty()) {
-                            Toast.makeText(context, "请先添加至少一个步骤", Toast.LENGTH_SHORT).show()
-                            return@TextButton
-                        }
-                        val saved = GkdTask(
-                            id = existing?.id ?: "task_${System.currentTimeMillis()}",
-                            name = name.trim().ifEmpty { "场景流" },
-                            packageName = pkg,
-                            activityIds = activityIdsText.lines()
-                                .map { it.trim() }.filter { it.isNotEmpty() },
-                            enabled = existing?.enabled ?: false,
-                            rules = emptyList(),
-                            steps = parsed,
-                        )
-                        onSave(saved)
-                        Toast.makeText(context, "场景流已保存(${parsed.size} 步)", Toast.LENGTH_SHORT).show()
-                        return@TextButton
-                    }
-                    // 解析 GKD 选择器;语法错误不允许保存(多行 = 多条选择器)
-                    var parseFailed = false
-                    fun parseList(text: String, field: String): List<GkdSelector> {
-                        return text.lines()
-                            .map { it.trim() }
-                            .filter { it.isNotEmpty() && !it.startsWith("//") }
-                            .map { expr ->
-                                runCatching { GkdSelector.parse(expr) }.getOrElse {
-                                    Toast.makeText(context, "$field 语法错误: $expr", Toast.LENGTH_LONG).show()
-                                    parseFailed = true
-                                    return listOf()
-                                }
-                            }
-                    }
-                    val sel = parseList(matchesText, "matches")
-                    if (parseFailed) return@TextButton
-                    val anySel = parseList(anyMatchesText, "anyMatches")
-                    if (parseFailed) return@TextButton
-                    val excludeSel = parseList(excludeMatchesText, "excludeMatches")
-                    if (parseFailed) return@TextButton
-                    val excludeAllSel = parseList(excludeAllMatchesText, "excludeAllMatches")
-                    if (parseFailed) return@TextButton
-                    if (sel.isEmpty() && anySel.isEmpty()) {
-                        Toast.makeText(context, "matches 与 anyMatches 至少填一个", Toast.LENGTH_SHORT).show()
-                        return@TextButton
-                    }
-                    val action: Action = Action.entries.firstOrNull { it.gkd == actionKind } ?: Action.Click
-                    val max = (actionMax.toLongOrNull() ?: 1L).coerceAtLeast(1L)
-                    val preKeys = preKeysText.split(',', '，', ' ')
-                        .mapNotNull { it.trim().toLongOrNull() }
-                    fun parsePosition(text: String): GkdTask.Position? {
-                        val t = text.trim()
-                        if (t.isEmpty()) return null
-                        var p = GkdTask.Position()
-                        runCatching {
-                            t.split(',', '，').map { it.trim() }.filter { it.isNotEmpty() }.forEach { kv ->
-                                val (k, v) = kv.split('=', limit = 2).map { it.trim() }
-                                p = when (k) {
-                                    "left" -> p.copy(left = v); "top" -> p.copy(top = v)
-                                    "right" -> p.copy(right = v); "bottom" -> p.copy(bottom = v)
-                                    "x" -> p.copy(x = v); "y" -> p.copy(y = v)
-                                    else -> p
-                                }
-                            }
-                        }.getOrElse {
-                            Toast.makeText(context, "position 格式错误,示例: left=width/2,top=height/2", Toast.LENGTH_LONG).show()
-                            parseFailed = true
-                        }
-                        return p.takeIf { it.isValid }
-                    }
-                    fun parseSwipeArg(text: String): GkdTask.SwipeArg? {
-                        val t = text.trim()
-                        if (t.isEmpty()) return null
-                        // 形式: start(left=…,top=…),end(left=…,top=…),duration=300
-                        val parsed = runCatching {
-                            var start = GkdTask.Position()
-                            var end: GkdTask.Position? = null
-                            var duration = 300L
-                            Regex("start\\(([^)]*)\\)").find(t)?.let { m ->
-                                m.groupValues[1].split(',', '，').map { it.trim() }.filter { it.isNotEmpty() }
-                                    .forEach { kv ->
-                                        val (k, v) = kv.split('=', limit = 2).map { it.trim() }
-                                        start = when (k) {
-                                            "left" -> start.copy(left = v); "top" -> start.copy(top = v)
-                                            "x" -> start.copy(x = v); "y" -> start.copy(y = v)
-                                            else -> start
-                                        }
-                                    }
-                            }
-                            Regex("end\\(([^)]*)\\)").find(t)?.let { m ->
-                                var e = GkdTask.Position()
-                                m.groupValues[1].split(',', '，').map { it.trim() }.filter { it.isNotEmpty() }
-                                    .forEach { kv ->
-                                        val (k, v) = kv.split('=', limit = 2).map { it.trim() }
-                                        e = when (k) {
-                                            "left" -> e.copy(left = v); "top" -> e.copy(top = v)
-                                            "x" -> e.copy(x = v); "y" -> e.copy(y = v)
-                                            else -> e
-                                        }
-                                    }
-                                end = e
-                            }
-                            Regex("duration=(\\d+)").find(t)?.let { duration = it.groupValues[1].toLong() }
-                            if (!start.isValid) error("start 缺少 x/y 定位字段")
-                            GkdTask.SwipeArg(start = start, end = end?.takeIf { it.isValid }, duration = duration)
-                        }.getOrElse {
-                            Toast.makeText(context, "swipeArg 格式错误,示例: start(x=screenWidth/2,y=screenHeight*0.8),end(x=screenWidth/2,y=screenHeight*0.3)", Toast.LENGTH_LONG).show()
-                            parseFailed = true
-                            null
-                        }
-                        return parsed
-                    }
-                    val position = parsePosition(positionText)
-                    if (parseFailed) return@TextButton
-                    val swipeArg = if (actionKind == "swipe") parseSwipeArg(swipeArgText) else null
-                    if (parseFailed) return@TextButton
-                    // swipe 方向编码:GKD 新版用 swipeArg;无绝对坐标时以 endY=-2 表示下滑,null=上滑
-                    val rule = GkdTask.Rule(
-                        key = rule0?.key ?: 0L,
-                        name = name.trim(),
-                        matches = sel,
-                        anyMatches = anySel,
-                        excludeMatches = excludeSel,
-                        excludeAllMatches = excludeAllSel,
-                        preKeys = preKeys,
-                        action = action,
-                        // 本地扩展 swipeDir:2 = 下滑;GKD 标准形态用 swipeArg 表达式
-                        swipeDir = if (actionKind == "scrollBackward") 2 else null,
-                        position = position,
-                        swipeArg = swipeArg,
-                        actionMaximum = max,
-                        actionCd = actionCdText.toLongOrNull() ?: 0L,
-                        actionDelay = actionDelayText.toLongOrNull() ?: 0L,
-                        matchTime = matchTimeText.toLongOrNull() ?: 0L,
-                        priorityTime = priorityTimeText.toLongOrNull() ?: 0L,
-                        forcedTime = forcedTimeText.toLongOrNull() ?: 0L,
-                        fastQuery = fastQueryOn,
-                        matchRoot = matchRootOn,
-                        resetMatch = resetMatchKind,
-                        order = orderText.toLongOrNull() ?: 0L,
+            Surface(
+                color = if (validation.ok) cs.primaryContainer else cs.errorContainer,
+                contentColor = if (validation.ok) cs.onPrimaryContainer else cs.onErrorContainer,
+                shape = RoundedCornerShape(999.dp),
+            ) {
+                Row(
+                    modifier = Modifier.padding(horizontal = 10.dp, vertical = 5.dp),
+                    horizontalArrangement = Arrangement.spacedBy(4.dp),
+                    verticalAlignment = Alignment.CenterVertically,
+                ) {
+                    Icon(
+                        imageVector = if (validation.ok) Icons.Filled.Check else Icons.Filled.Error,
+                        contentDescription = null,
+                        modifier = Modifier.size(14.dp),
                     )
-                    val saved = GkdTask(
-                        id = existing?.id ?: "task_${System.currentTimeMillis()}",
-                        name = name.trim().ifEmpty { rule.name.ifEmpty { "规则${rule.key}" } },
-                        packageName = pkg,
-                        activityIds = activityIdsText.lines()
-                            .map { it.trim() }.filter { it.isNotEmpty() },
-                        // 本地新建规则也默认关闭,用户在任务页手动开启
-                        enabled = existing?.enabled ?: false,
-                        rules = listOf(rule),
+                    Text(
+                        text = if (validation.ok) "可保存" else "待修正",
+                        style = MaterialTheme.typography.labelSmall,
                     )
-                    onSave(saved)
-                    Toast.makeText(context, "规则已保存", Toast.LENGTH_SHORT).show()
-                },
-                enabled = true,
-                shape = MaterialTheme.shapes.large,
-                colors = ButtonDefaults.buttonColors(containerColor = MaterialTheme.colorScheme.primary),
-            ) { Text("保存") }
+                }
+            }
         }
+        HorizontalDivider(color = cs.outlineVariant.copy(alpha = 0.4f))
 
-        // GKD 规则表单:一条规则 = 一个动作
-        Column(
+        // 手风琴正文:滚动区
+        LazyColumn(
             modifier = Modifier
-                .fillMaxSize()
-                .verticalScroll(rememberScrollState())
-                .padding(horizontal = 16.dp, vertical = 8.dp),
+                .weight(1f)
+                .fillMaxWidth(),
+            contentPadding = PaddingValues(horizontal = 16.dp, vertical = 12.dp),
             verticalArrangement = Arrangement.spacedBy(12.dp),
         ) {
-            OutlinedTextField(
-                value = name,
-                onValueChange = { name = it },
-                label = { Text("规则名(可选)") },
-                singleLine = true,
-                modifier = Modifier.fillMaxWidth(),
-            )
-            // 模式切换:单步规则 / 多步骤场景流
-            Row(
-                modifier = Modifier.fillMaxWidth(),
-                horizontalArrangement = Arrangement.spacedBy(8.dp),
-            ) {
-                FilterChip(
-                    selected = !stepMode,
-                    onClick = { stepMode = false },
-                    label = { Text("单步规则") },
-                )
-                FilterChip(
-                    selected = stepMode,
-                    onClick = { stepMode = true },
-                    label = { Text("多步骤场景流") },
-                )
-            }
-            OutlinedTextField(
-                value = activityIdsText,
-                onValueChange = { activityIdsText = it },
-                label = { Text("activityIds(每行一个,留空 = 任意 Activity)") },
-                minLines = 1, maxLines = 4,
-                modifier = Modifier.fillMaxWidth(),
-            )
-            // 单步表单(步骤模式下收起,由场景流编辑区替代)
-            if (!stepMode) {
-            SelectorExprField(
-                value = matchesText,
-                onChange = { matchesText = it },
-                label = "matches(GKD 选择器,全部命中;每行一条)",
-                hint = "例: [text*=\"跳过\"][clickable=true];支持多行,动作目标 = 最后一行",
-                minLines = 2,
-            )
-            SelectorExprField(
-                value = anyMatchesText,
-                onChange = { anyMatchesText = it },
-                label = "anyMatches(任一命中即可,可选;每行一条)",
-                hint = "与 matches 二选一;都填时仍以 matches 为准",
-                minLines = 1,
-            )
-            // 常用选择器片段:点按插入到 matches 末尾
-            Text("选择器片段(点按插入 matches)", style = MaterialTheme.typography.labelMedium,
-                color = MaterialTheme.colorScheme.onSurfaceVariant)
-            Row(
-                modifier = Modifier.horizontalScroll(rememberScrollState()),
-                horizontalArrangement = Arrangement.spacedBy(8.dp),
-            ) {
-                SELECTOR_SNIPPETS.forEach { (label, snippet) ->
-                    FilterChip(
-                        selected = false,
-                        onClick = {
-                            matchesText = matchesText.trimEnd().let { if (it.isEmpty()) snippet else "$it\n$snippet" }
-                        },
-                        label = { Text(label) },
-                    )
-                }
-            }
-            Text(
-                text = "action",
-                style = MaterialTheme.typography.titleSmall,
-                fontWeight = FontWeight.SemiBold,
-            )
-            // GKD 全量动作
-            Row(
-                modifier = Modifier.horizontalScroll(rememberScrollState()),
-                horizontalArrangement = Arrangement.spacedBy(8.dp),
-            ) {
-                Action.entries.forEach { a ->
-                    FilterChip(
-                        selected = actionKind == a.gkd,
-                        onClick = { actionKind = a.gkd },
-                        label = { Text(GKD_ACTION_LABELS[a.gkd] ?: a.gkd) },
-                    )
-                }
-            }
-            OutlinedTextField(
-                value = actionMax,
-                onValueChange = { actionMax = it.filter { c -> c.isDigit() } },
-                label = { Text("actionMaximum(执行次数)") },
-                singleLine = true,
-                modifier = Modifier.fillMaxWidth(),
-            )
-            // action 专属提示:该动作对选择器/参数的要求
-            ACTION_HINTS[actionKind]?.let { hint ->
-                Text(
-                    hint,
-                    style = MaterialTheme.typography.bodySmall,
-                    color = MaterialTheme.colorScheme.tertiary,
-                )
-            }
-            // 高级参数折叠区
-            TextButton(onClick = { showAdvanced = !showAdvanced }) {
-                Text(if (showAdvanced) "收起高级参数" else "高级参数(冷却/延迟/重置等)")
-            }
-            if (showAdvanced) {
-                OutlinedTextField(
-                    value = actionCdText,
-                    onValueChange = { actionCdText = it.filter { c -> c.isDigit() } },
-                    label = { Text("actionCd(冷却 ms,0 = 默认 1000)") },
-                    singleLine = true,
-                    modifier = Modifier.fillMaxWidth(),
-                )
-                OutlinedTextField(
-                    value = actionDelayText,
-                    onValueChange = { actionDelayText = it.filter { c -> c.isDigit() } },
-                    label = { Text("actionDelay(延迟执行 ms,延迟后重新校验选择器)") },
-                    singleLine = true,
-                    modifier = Modifier.fillMaxWidth(),
-                )
-                Text("matchTime(匹配时间窗 ms,0 = 不限)", style = MaterialTheme.typography.titleSmall)
-                Row(horizontalArrangement = Arrangement.spacedBy(8.dp), modifier = Modifier.horizontalScroll(rememberScrollState())) {
-                    listOf("3000" to "3秒", "10000" to "10秒(推荐)", "0" to "不限").forEach { (v, label) ->
-                        FilterChip(
-                            selected = matchTimeText == v,
-                            onClick = { matchTimeText = v },
-                            label = { Text(label) },
-                        )
-                    }
-                }
-                OutlinedTextField(
-                    value = matchTimeText,
-                    onValueChange = { matchTimeText = it.filter { c -> c.isDigit() } },
-                    label = { Text("matchTime 数值(ms)") },
-                    singleLine = true,
-                    modifier = Modifier.fillMaxWidth(),
-                )
-                OutlinedTextField(
-                    value = priorityTimeText,
-                    onValueChange = { priorityTimeText = it.filter { c -> c.isDigit() } },
-                    label = { Text("priorityTime(优先级窗 ms,窗内优先匹配并可打断普通规则)") },
-                    singleLine = true,
-                    modifier = Modifier.fillMaxWidth(),
-                )
-                OutlinedTextField(
-                    value = forcedTimeText,
-                    onValueChange = { forcedTimeText = it.filter { c -> c.isDigit() } },
-                    label = { Text("forcedTime(主动轮询窗 ms;flutter/webview 不发界面事件时用)") },
-                    singleLine = true,
-                    modifier = Modifier.fillMaxWidth(),
-                )
-                OutlinedTextField(
-                    value = preKeysText,
-                    onValueChange = { preKeysText = it },
-                    label = { Text("preKeys(前置规则 key,逗号分隔;须在 10s 内刚执行过)") },
-                    singleLine = true,
-                    modifier = Modifier.fillMaxWidth(),
-                )
-                OutlinedTextField(
-                    value = orderText,
-                    onValueChange = { orderText = it.filter { c -> c == '-' || c.isDigit() } },
-                    label = { Text("order(匹配顺序,越小越先,可为负)") },
-                    singleLine = true,
-                    modifier = Modifier.fillMaxWidth(),
-                )
-                SelectorExprField(
-                    value = excludeMatchesText,
-                    onChange = { excludeMatchesText = it },
-                    label = "excludeMatches(存在一个命中即跳过本规则;每行一条)",
-                    hint = "例: [vid=\"close_btn\"] 存在时不执行",
-                    minLines = 1,
-                )
-                SelectorExprField(
-                    value = excludeAllMatchesText,
-                    onChange = { excludeAllMatchesText = it },
-                    label = "excludeAllMatches(全部命中才跳过本规则;每行一条)",
-                    hint = "与 excludeMatches 的区别:AND 语义,全部存在才拦截",
-                    minLines = 1,
-                )
-                Text("position(自定义点击坐标,相对目标节点边界;可选)", style = MaterialTheme.typography.titleSmall)
-                OutlinedTextField(
-                    value = positionText,
-                    onValueChange = { positionText = it },
-                    label = { Text("left / top / right / bottom / x / y 表达式") },
-                    placeholder = { Text("left=width/2,top=height/2 (节点中心)") },
-                    supportingText = { Text("变量: left top right bottom width height random screenWidth screenHeight;有 position 时 click/longClick 走坐标手势") },
-                    minLines = 1, maxLines = 2,
-                    modifier = Modifier.fillMaxWidth(),
-                )
-                if (actionKind == "swipe") {
-                    Text("swipeArg(滑动参数)", style = MaterialTheme.typography.titleSmall)
-                    OutlinedTextField(
-                        value = swipeArgText,
-                        onValueChange = { swipeArgText = it },
-                        label = { Text("start(...) end(...) duration=...") },
-                        placeholder = { Text("start(x=screenWidth/2,y=screenHeight*0.8),end(x=screenWidth/2,y=screenHeight*0.3),duration=300") },
-                        supportingText = { Text("start 必填;end 缺省 = start;留空 = 整屏上滑") },
-                        minLines = 1, maxLines = 3,
-                        modifier = Modifier.fillMaxWidth(),
-                    )
-                }
-                Text("resetMatch(休眠重置策略)", style = MaterialTheme.typography.titleSmall)
-                Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                    GkdTask.ResetMatch.entries.forEach { rm ->
-                        FilterChip(
-                            selected = resetMatchKind == rm,
-                            onClick = { resetMatchKind = rm },
-                            label = { Text(rm.gkd) },
-                        )
-                    }
-                }
-                Row(horizontalArrangement = Arrangement.spacedBy(24.dp)) {
-                    Row(verticalAlignment = Alignment.CenterVertically) {
-                        Switch(checked = fastQueryOn, onCheckedChange = { fastQueryOn = it })
-                        Spacer(Modifier.width(8.dp))
-                        Text("fastQuery")
-                    }
-                    Row(verticalAlignment = Alignment.CenterVertically) {
-                        Switch(checked = matchRootOn, onCheckedChange = { matchRootOn = it })
-                        Spacer(Modifier.width(8.dp))
-                        Text("matchRoot")
-                    }
-                }
-            }
-            Text(
-                text = "GKD 语义:matches 命中的节点即动作目标;back / swipe 为全局动作,无需选择器。",
-                style = MaterialTheme.typography.bodySmall,
-                color = MaterialTheme.colorScheme.onSurfaceVariant,
-            )
-            } else {
-                // ---- 多步骤场景流编辑区 ----
-                Text(
-                    text = "场景流步骤(按序执行,每步等待目标出现后执行动作)",
-                    style = MaterialTheme.typography.titleSmall,
-                    fontWeight = FontWeight.SemiBold,
-                )
-                fun updateDraft(i: Int, transform: (StepDraft) -> StepDraft) {
-                    stepDrafts = stepDrafts.mapIndexed { j, d -> if (j == i) transform(d) else d }
-                }
-                stepDrafts.forEachIndexed { idx, d ->
-                    val expanded = editingStepIdx == idx
-                    Card(
-                        modifier = Modifier.fillMaxWidth(),
-                        colors = CardDefaults.cardColors(
-                            containerColor = if (expanded) MaterialTheme.colorScheme.primaryContainer.copy(alpha = 0.25f)
-                            else MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.45f),
-                        ),
-                        shape = MaterialTheme.shapes.medium,
-                    ) {
-                        Column {
-                            // 折叠行:序号 + 名称 + 动作 + 等待时长,点按展开/收起
-                            Row(
-                                modifier = Modifier
-                                    .fillMaxWidth()
-                                    .combinedClickable(
-                                        onClick = { editingStepIdx = if (expanded) null else idx },
-                                        onLongClick = {},
-                                    )
-                                    .padding(horizontal = 12.dp, vertical = 10.dp),
-                                verticalAlignment = Alignment.CenterVertically,
-                            ) {
-                                Text(
-                                    text = "${idx + 1}",
-                                    style = MaterialTheme.typography.labelSmall,
-                                    color = MaterialTheme.colorScheme.primary,
-                                    fontFamily = androidx.compose.ui.text.font.FontFamily.Monospace,
-                                    modifier = Modifier
-                                        .background(
-                                            MaterialTheme.colorScheme.primary.copy(alpha = 0.12f),
-                                            MaterialTheme.shapes.small,
-                                        )
-                                        .padding(horizontal = 6.dp, vertical = 2.dp),
-                                )
-                                Spacer(modifier = Modifier.width(10.dp))
-                                Text(
-                                    text = d.name.ifEmpty { "步骤${idx + 1}" },
-                                    style = MaterialTheme.typography.titleSmall,
-                                    fontWeight = FontWeight.SemiBold,
-                                    modifier = Modifier.weight(1f),
-                                )
-                                Text(
-                                    text = buildString {
-                                        append(GKD_ACTION_LABELS[d.actionKind] ?: d.actionKind)
-                                        val wt = d.waitTimeoutText.toLongOrNull() ?: 0L
-                                        if (wt > 0) append(" · 等${wt / 1000}s")
-                                    },
-                                    style = MaterialTheme.typography.bodySmall,
-                                    color = MaterialTheme.colorScheme.onSurfaceVariant,
-                                )
-                                Icon(
-                                    imageVector = if (expanded) Icons.Filled.KeyboardArrowUp else Icons.Filled.KeyboardArrowDown,
-                                    contentDescription = null,
-                                    tint = MaterialTheme.colorScheme.onSurfaceVariant,
-                                )
-                            }
-                            // 展开编辑区:名称 / 选择器 / 动作 / 等待参数
-                            if (expanded) {
-                                Column(
-                                    modifier = Modifier.padding(horizontal = 12.dp, vertical = 4.dp),
-                                    verticalArrangement = Arrangement.spacedBy(10.dp),
-                                ) {
-                                    OutlinedTextField(
-                                        value = d.name,
-                                        onValueChange = { v -> updateDraft(idx) { it.copy(name = v) } },
-                                        label = { Text("步骤名(可选)") },
-                                        singleLine = true,
-                                        modifier = Modifier.fillMaxWidth(),
-                                    )
-                                    SelectorExprField(
-                                        value = d.matchesText,
-                                        onChange = { v -> updateDraft(idx) { it.copy(matchesText = v) } },
-                                        label = "本步选择器(每行一条,全部命中;留空 = 无条件步)",
-                                        hint = "例: [text*=\"同意\"][clickable=true]",
-                                        minLines = 2,
-                                    )
-                                    // 动作选择
-                                    Row(
-                                        modifier = Modifier.horizontalScroll(rememberScrollState()),
-                                        horizontalArrangement = Arrangement.spacedBy(8.dp),
-                                    ) {
-                                        Action.entries.forEach { a ->
-                                            FilterChip(
-                                                selected = d.actionKind == a.gkd,
-                                                onClick = { updateDraft(idx) { it.copy(actionKind = a.gkd) } },
-                                                label = { Text(GKD_ACTION_LABELS[a.gkd] ?: a.gkd) },
-                                            )
-                                        }
-                                    }
-                                    OutlinedTextField(
-                                        value = d.waitTimeoutText,
-                                        onValueChange = { v -> updateDraft(idx) { it.copy(waitTimeoutText = v.filter { c -> c.isDigit() }) } },
-                                        label = { Text("等待目标出现超时 ms(0 = 只查当帧)") },
-                                        singleLine = true,
-                                        modifier = Modifier.fillMaxWidth(),
-                                    )
-                                    OutlinedTextField(
-                                        value = d.settleTimeText,
-                                        onValueChange = { v -> updateDraft(idx) { it.copy(settleTimeText = v.filter { c -> c.isDigit() }) } },
-                                        label = { Text("目标出现后稳定等待 ms(防动画中点空)") },
-                                        singleLine = true,
-                                        modifier = Modifier.fillMaxWidth(),
-                                    )
-                                    Row(verticalAlignment = Alignment.CenterVertically) {
-                                        Switch(
-                                            checked = d.skipOnTimeout,
-                                            onCheckedChange = { v -> updateDraft(idx) { it.copy(skipOnTimeout = v) } },
-                                        )
-                                        Spacer(Modifier.width(8.dp))
-                                        Text("超时跳过(关闭 = 超时终止整个流)", style = MaterialTheme.typography.bodySmall)
-                                    }
-                                    // 排序 / 删除
-                                    Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                                        TextButton(
-                                            onClick = {
-                                                if (idx > 0) {
-                                                    stepDrafts = stepDrafts.toMutableList().apply { add(idx - 1, removeAt(idx)) }
-                                                    editingStepIdx = idx - 1
-                                                }
-                                            },
-                                            enabled = idx > 0,
-                                        ) { Text("上移") }
-                                        TextButton(
-                                            onClick = {
-                                                if (idx < stepDrafts.size - 1) {
-                                                    stepDrafts = stepDrafts.toMutableList().apply { add(idx + 1, removeAt(idx)) }
-                                                    editingStepIdx = idx + 1
-                                                }
-                                            },
-                                            enabled = idx < stepDrafts.size - 1,
-                                        ) { Text("下移") }
-                                        TextButton(
-                                            onClick = {
-                                                stepDrafts = stepDrafts.filterIndexed { j, _ -> j != idx }
-                                                editingStepIdx = null
-                                            },
-                                        ) { Text("删除", color = MaterialTheme.colorScheme.error) }
-                                    }
-                                }
-                            }
-                        }
-                    }
-                }
-                // 添加步骤
-                Surface(
-                    onClick = {
-                        stepDrafts = stepDrafts + StepDraft("", "", "click", "3000", "0", false)
-                        editingStepIdx = stepDrafts.size - 1
+            items(sections, key = { it.id }) { sec ->
+                EditorAccordion(
+                    item = sec,
+                    expanded = expandedSections.contains(sec.id),
+                    hasError = validation.errors.containsKey(sec.id),
+                    onToggle = {
+                        expandedSections = if (sec.id in expandedSections)
+                            expandedSections - sec.id else expandedSections + sec.id
                     },
-                    modifier = Modifier.fillMaxWidth().height(48.dp),
-                    shape = MaterialTheme.shapes.large,
-                    color = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.45f),
                 ) {
-                    Row(
-                        modifier = Modifier.fillMaxSize(),
-                        horizontalArrangement = Arrangement.Center,
-                        verticalAlignment = Alignment.CenterVertically,
-                    ) {
-                        Icon(Icons.Filled.Add, contentDescription = null, modifier = Modifier.size(18.dp))
-                        Spacer(modifier = Modifier.width(6.dp))
-                        Text("添加步骤", style = MaterialTheme.typography.titleSmall, fontWeight = FontWeight.SemiBold)
-                    }
+                    sectionBody(sec.id)
                 }
-                Text(
-                    text = "场景流由第一步的选择器触发;组内 rules 不参与独立调度。",
-                    style = MaterialTheme.typography.bodySmall,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant,
-                )
+            }
+        }
+
+        // 底部常驻保存栏:错误提示 + 保存按钮
+        Row(
+            modifier = Modifier
+                .fillMaxWidth()
+                .background(cs.surface)
+                .padding(start = 16.dp, end = 16.dp, top = 10.dp, bottom = 12.dp),
+            verticalAlignment = Alignment.CenterVertically,
+        ) {
+            val firstError = validation.errors.values.flatten().firstOrNull()
+            if (firstError != null) {
+                Column(modifier = Modifier.weight(1f).padding(end = 12.dp)) {
+                    Text(
+                        text = firstError,
+                        style = MaterialTheme.typography.labelSmall,
+                        color = cs.error,
+                        maxLines = 1,
+                        overflow = TextOverflow.Ellipsis,
+                    )
+                }
+            }
+            Button(
+                onClick = { doSave() },
+                enabled = validation.ok,
+                shape = RoundedCornerShape(999.dp),
+                modifier = Modifier
+                    .weight(if (firstError != null) 0.6f else 1f)
+                    .height(48.dp),
+                contentPadding = PaddingValues(horizontal = 24.dp),
+            ) {
+                Icon(Icons.Filled.PlaylistAddCheck, contentDescription = null, modifier = Modifier.size(18.dp))
+                Spacer(Modifier.width(6.dp))
+                Text("保存")
             }
         }
     }
@@ -3556,36 +4357,53 @@ private fun SubscriptionManageDialog(
     )
 }
 
-/** GKD 选择器表达式输入框:实时校验语法(支持多行,每行一条),错误时标红提示 */
+/** 触发事件类型选择区:多选 chips(哪些事件触发评估)+ 反向触发开关(本地扩展,不导出 GKD 订阅) */
+@OptIn(ExperimentalLayoutApi::class)
 @Composable
-private fun SelectorExprField(
-    value: String,
-    onChange: (String) -> Unit,
-    label: String,
-    hint: String,
-    minLines: Int = 1,
+private fun RuleTriggerSection(
+    selectedTypes: Set<String>,
+    onTypesChange: (Set<String>) -> Unit,
+    onAbsent: Boolean,
+    onAbsentChange: (Boolean) -> Unit,
 ) {
-    // 逐行校验:空行与 // 注释行跳过;错误行号拼进提示
-    val error = value.lines()
-        .mapIndexedNotNull { idx, line ->
-            val t = line.trim()
-            if (t.isEmpty() || t.startsWith("//")) null else {
-                runCatching { GkdSelector.parse(t) }.exceptionOrNull()?.let { "第 ${idx + 1} 行: ${it.message}" }
-            }
-        }.firstOrNull()
-    OutlinedTextField(
-        value = value,
-        onValueChange = onChange,
-        label = { Text(label) },
-        isError = error != null,
-        supportingText = { Text(error ?: hint) },
-        minLines = minLines,
-        maxLines = 6,
-        textStyle = MaterialTheme.typography.bodySmall.copy(
-            fontFamily = androidx.compose.ui.text.font.FontFamily.Monospace,
-        ),
-        modifier = Modifier.fillMaxWidth(),
+    // 顺序即展示顺序,与 TaskRunner.knownEventTypes 保持一致
+    val labels = linkedMapOf(
+        "windowStateChanged" to "窗口状态变化",
+        "windowContentChanged" to "窗口内容变化",
+        "viewFocused" to "焦点",
+        "viewTextChanged" to "文本输入",
+        "viewClicked" to "点击",
+        "viewLongClicked" to "长按",
     )
+    Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
+        Text(
+            text = "触发事件(多选;不选 = 状态+内容变化)",
+            style = MaterialTheme.typography.labelMedium,
+            color = MaterialTheme.colorScheme.onSurfaceVariant,
+        )
+        Row(
+            modifier = Modifier.horizontalScroll(rememberScrollState()),
+            horizontalArrangement = Arrangement.spacedBy(8.dp),
+        ) {
+            labels.forEach { (type, label) ->
+                ChoiceChip(
+                    selected = type in selectedTypes,
+                    onClick = {
+                        onTypesChange(
+                            if (type in selectedTypes) selectedTypes - type else selectedTypes + type,
+                        )
+                    },
+                    label = label,
+                )
+            }
+        }
+        SwitchRow(
+            checked = onAbsent,
+            onCheckedChange = onAbsentChange,
+            label = "反向触发",
+            desc = "节点不存在时执行(仅返回/滑动/坐标类动作有效)",
+        )
+    }
 }
 
 /** 编辑器常用选择器片段(label to gkd 表达式) */

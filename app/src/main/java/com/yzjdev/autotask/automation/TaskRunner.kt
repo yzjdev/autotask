@@ -97,6 +97,29 @@ class TaskRunner(private val service: DramaAccessibilityService) {
 
     /** Activity 切换入口:由服务的 TYPE_WINDOW_STATE_CHANGED 调用 */
     fun onActivityChanged(packageName: String, activityName: String) {
+        evaluateRules(packageName, activityName, eventType = "windowStateChanged")
+    }
+
+    /** 窗口内容变化入口:由服务的 TYPE_WINDOW_CONTENT_CHANGED 去抖后调用 */
+    fun onContentChanged(packageName: String, activityName: String) {
+        evaluateRules(packageName, activityName, eventType = "windowContentChanged")
+    }
+
+    /** 通用事件入口:viewFocused/viewClicked/viewLongClicked/viewTextChanged 等由服务转发 */
+    fun onEvent(packageName: String, activityName: String, eventType: String) {
+        evaluateRules(packageName, activityName, eventType)
+    }
+
+    /** 事件类型名(AccessibilityEvent type):供规则 eventTypes 匹配 */
+    val knownEventTypes: List<String> = listOf(
+        "windowStateChanged", "windowContentChanged", "viewFocused",
+        "viewTextChanged", "viewClicked", "viewLongClicked",
+    )
+
+    /**
+     * 规则评估:仅评估 eventTypes 包含当前事件类型的规则(空列表 = 默认 windowStateChanged)。
+     */
+    private fun evaluateRules(packageName: String, activityName: String, eventType: String) {
         val now = System.currentTimeMillis()
         val root = service.rootInActiveWindow ?: return
         for (task in tasks.sortedBy { it.order }) {
@@ -108,14 +131,20 @@ class TaskRunner(private val service: DramaAccessibilityService) {
                 tasks.any { it.packageName == packageName && it.name.contains(task.disableIfAppGroupMatch) }
             ) continue
             if (!activityMatch(task.activityIds, activityName)) continue
-            // 多步骤编排组:规则不独立调度,由第一步匹配启动场景流
+            // 多步骤编排组:规则不独立调度,由第一步匹配启动场景流(仅状态变化启动)
             val steps = task.steps
             if (steps != null && steps.isNotEmpty()) {
-                tryLaunchScene(task, steps, root, now)
+                if (eventType == "windowStateChanged") tryLaunchScene(task, steps, root, now)
                 continue
             }
-            // 规则排序:优先级(窗内)在前,其余按 order;普通规则不被优先级规则中断(简化:一次遍历内先执行优先级)
+            // 事件类型过滤:规则未订阅当前事件类型则跳过(空列表 = 默认状态+内容变化双订阅)
             val ranked = task.rules
+                .filter { rule ->
+                    val types = rule.eventTypes.ifEmpty {
+                        listOf("windowStateChanged", "windowContentChanged")
+                    }
+                    eventType in types
+                }
                 .map { it to state(task, it) }
                 .filter { (r, s) -> schedulable(task, r, s, now) }
                 .sortedWith(compareBy({ (r, s) -> if (priorityActive(task, r, s, now)) 0 else 1 }, { (r, _) -> groupOr(task.order, r.order) }))
@@ -176,6 +205,12 @@ class TaskRunner(private val service: DramaAccessibilityService) {
     private fun ruleMatches(root: AccessibilityNodeInfo, rule: GkdTask.Rule): Boolean {
         if (rule.excludeMatches.isNotEmpty() && rule.excludeMatches.any { it.find(root).isNotEmpty() }) return false
         if (rule.excludeAllMatches.isNotEmpty() && rule.excludeAllMatches.all { it.find(root).isNotEmpty() }) return false
+        if (rule.triggerOnAbsent) {
+            // 反向触发:所有触发选择器均未命中才算命中(排除条件照常生效)
+            if (rule.matches.any { it.find(root).isNotEmpty() }) return false
+            if (rule.anyMatches.any { it.find(root).isNotEmpty() }) return false
+            return rule.matches.isNotEmpty() || rule.anyMatches.isNotEmpty()
+        }
         if (rule.matches.isNotEmpty()) return rule.matches.all { it.find(root).isNotEmpty() }
         if (rule.anyMatches.isNotEmpty()) return rule.anyMatches.any { it.find(root).isNotEmpty() }
         return false
@@ -186,6 +221,12 @@ class TaskRunner(private val service: DramaAccessibilityService) {
     /** 步骤匹配:与规则同语义(matches 全命中 + anyMatches 任一 + exclude 排除;全空 = 无条件步) */
     private fun stepMatches(root: AccessibilityNodeInfo, step: GkdTask.Step): Boolean {
         if (step.excludeMatches.isNotEmpty() && step.excludeMatches.any { it.find(root).isNotEmpty() }) return false
+        if (step.triggerOnAbsent) {
+            // 反向触发:所有触发选择器均未命中才算命中(排除条件照常生效)
+            if (step.matches.any { it.find(root).isNotEmpty() }) return false
+            if (step.anyMatches.any { it.find(root).isNotEmpty() }) return false
+            return step.matches.isNotEmpty() || step.anyMatches.isNotEmpty()
+        }
         if (step.matches.isNotEmpty()) return step.matches.all { it.find(root).isNotEmpty() }
         if (step.anyMatches.isNotEmpty()) return step.anyMatches.any { it.find(root).isNotEmpty() }
         return true
@@ -225,6 +266,21 @@ class TaskRunner(private val service: DramaAccessibilityService) {
     private suspend fun runScene(task: GkdTask, steps: List<GkdTask.Step>) {
         for ((i, step) in steps.withIndex()) {
             val label = step.name.ifEmpty { "步骤${i + 1}" }
+            if (step.triggerOnAbsent) {
+                // 反向步骤:等待目标节点消失后执行(动作无节点目标,仅返回/滑动/坐标类)
+                if (!awaitStepAbsent(step)) {
+                    if (step.onTimeout == GkdTask.Step.TimeoutPolicy.Continue) {
+                        LogStore.log("  ↳ 「$label」等待消失超时,跳过")
+                        continue
+                    }
+                    LogStore.log("  ⏹ 「$label」等待消失超时,流终止")
+                    return
+                }
+                delay(step.settleTime)
+                delay(groupOr(task.actionDelay, 0L))
+                executeStep(task, step, null, label)
+                continue
+            }
             val target = awaitStepTarget(step)
             if (target == null) {
                 if (step.onTimeout == GkdTask.Step.TimeoutPolicy.Continue) {
@@ -257,18 +313,38 @@ class TaskRunner(private val service: DramaAccessibilityService) {
         }
     }
 
-    /** 步骤动作执行:与规则共用动作语义(position/swipeArg 分支照抄 executeRule) */
-    private fun executeStep(task: GkdTask, step: GkdTask.Step, target: AccessibilityNodeInfo, label: String) {
+    /** 轮询等待反向步骤(triggerOnAbsent)的目标消失;waitTimeout=0 时只查当帧 */
+    private suspend fun awaitStepAbsent(step: GkdTask.Step): Boolean {
+        val deadline = if (step.waitTimeout <= 0L) 0L else System.currentTimeMillis() + step.waitTimeout
+        val interval = if (step.waitInterval > 0L) step.waitInterval else 250L
+        while (true) {
+            val root = service.rootInActiveWindow
+            if (root != null && stepMatches(root, step)) return true
+            if (deadline == 0L || System.currentTimeMillis() >= deadline) return false
+            delay(interval)
+        }
+    }
+
+    /** 步骤动作执行:与规则共用动作语义(position/swipeArg 分支照抄 executeRule);反向步骤 target 为 null */
+    private fun executeStep(task: GkdTask, step: GkdTask.Step, target: AccessibilityNodeInfo?, label: String) {
         val action = step.action ?: Action.Click
+        if (target == null && action in listOf(
+                Action.ClickNode, Action.LongClickNode, Action.InputText, Action.Check, Action.Uncheck,
+            )
+        ) {
+            // 无目标节点时节点类动作无法执行(反向触发步骤常态)
+            LogStore.log("  ↳ 「$label」无目标节点,动作跳过")
+            return
+        }
         val r = android.graphics.Rect()
-        target.getBoundsInScreen(r)
+        target?.getBoundsInScreen(r)
         when (action) {
             Action.Click, Action.ClickNode, Action.ClickCenter -> {
                 when {
                     action == Action.ClickCenter || (action == Action.Click && step.position != null) ->
                         clickAtRect(step.position, r)
-                    action == Action.ClickNode -> target.performAction(AccessibilityNodeInfo.ACTION_CLICK)
-                    else -> if (!target.performAction(ACTION_CLICK)) clickAtRect(step.position, r)
+                    action == Action.ClickNode -> target?.performAction(AccessibilityNodeInfo.ACTION_CLICK)
+                    else -> if (target?.performAction(ACTION_CLICK) != true) clickAtRect(step.position, r)
                 }
                 LogStore.log("  ↳ 「$label」点击")
             }
@@ -276,8 +352,8 @@ class TaskRunner(private val service: DramaAccessibilityService) {
                 when {
                     action == Action.LongClickCenter || (action == Action.LongClick && step.position != null) ->
                         longClickAtRect(step.position, r)
-                    action == Action.LongClickNode -> target.performAction(ACTION_LONG_CLICK)
-                    else -> if (!target.performAction(ACTION_LONG_CLICK)) longClickAtRect(step.position, r)
+                    action == Action.LongClickNode -> target?.performAction(ACTION_LONG_CLICK)
+                    else -> if (target?.performAction(ACTION_LONG_CLICK) != true) longClickAtRect(step.position, r)
                 }
                 LogStore.log("  ↳ 「$label」长按")
             }
@@ -300,15 +376,15 @@ class TaskRunner(private val service: DramaAccessibilityService) {
                 LogStore.log("  ↳ 「$label」滑动")
             }
             Action.InputText -> {
-                target.performAction(AccessibilityNodeInfo.ACTION_FOCUS)
+                target?.performAction(AccessibilityNodeInfo.ACTION_FOCUS)
                 LogStore.log("  ↳ 「$label」输入文本(聚焦)")
             }
             Action.LaunchApp -> LogStore.log("  ↳ 「$label」启动应用(待实现)")
             Action.Check, Action.Uncheck -> {
-                val ok = target.performAction(
+                val ok = target?.performAction(
                     if (action == Action.Check) AccessibilityNodeInfo.ACTION_SELECT
                     else AccessibilityNodeInfo.ACTION_CLEAR_SELECTION,
-                )
+                ) == true
                 LogStore.log("  ↳ 「$label」${if (action == Action.Check) "勾选" else "取消勾选"}${if (ok) "" else "(失败)"}")
             }
             Action.None -> LogStore.log("  ↳ 「$label」匹配标记(无动作)")
@@ -392,19 +468,28 @@ class TaskRunner(private val service: DramaAccessibilityService) {
         val label = rule.name.ifEmpty { "规则${rule.key}" }
         val action = rule.action ?: Action.Click
         // 动作目标:matches 最后一条的查找结果(从右往左);position 存在时默认 clickCenter
-        val target = findTarget(rule) ?: run {
+        // 反向触发规则按定义无目标节点:target 为 null,仅执行 Back/Swipe/坐标类动作
+        val target = findTarget(rule) ?: if (rule.triggerOnAbsent) null else run {
             LogStore.log("  ↳ 「$label」未找到目标节点")
             return
         }
+        if (target == null && action in listOf(
+                Action.ClickNode, Action.LongClickNode, Action.InputText, Action.Check, Action.Uncheck,
+            )
+        ) {
+            // 无目标节点时节点类动作无法执行(反向触发规则常态)
+            LogStore.log("  ↳ 「$label」无目标节点,动作跳过")
+            return
+        }
         val r = android.graphics.Rect()
-        target.getBoundsInScreen(r)
+        target?.getBoundsInScreen(r)
         when (action) {
             Action.Click, Action.ClickNode, Action.ClickCenter -> {
                 when {
                     action == Action.ClickCenter || (action == Action.Click && rule.position != null) -> clickAtWithPosition(rule, r)
-                    action == Action.ClickNode -> target.performAction(AccessibilityNodeInfo.ACTION_CLICK)
+                    action == Action.ClickNode -> target?.performAction(AccessibilityNodeInfo.ACTION_CLICK)
                     else -> { // click 混合语义
-                        if (!target.performAction(ACTION_CLICK)) clickAtWithPosition(rule, r)
+                        if (target?.performAction(ACTION_CLICK) != true) clickAtWithPosition(rule, r)
                     }
                 }
                 LogStore.log("  ↳ 「$label」点击")
@@ -412,8 +497,8 @@ class TaskRunner(private val service: DramaAccessibilityService) {
             Action.LongClick, Action.LongClickNode, Action.LongClickCenter -> {
                 when {
                     action == Action.LongClickCenter || (action == Action.LongClick && rule.position != null) -> longClickAtWithPosition(rule, r)
-                    action == Action.LongClickNode -> target.performAction(ACTION_LONG_CLICK)
-                    else -> if (!target.performAction(ACTION_LONG_CLICK)) longClickAtWithPosition(rule, r)
+                    action == Action.LongClickNode -> target?.performAction(ACTION_LONG_CLICK)
+                    else -> if (target?.performAction(ACTION_LONG_CLICK) != true) longClickAtWithPosition(rule, r)
                 }
                 LogStore.log("  ↳ 「$label」长按")
             }
@@ -427,7 +512,7 @@ class TaskRunner(private val service: DramaAccessibilityService) {
                 when {
                     arg != null -> {
                         val rect = android.graphics.Rect()
-                        target.getBoundsInScreen(rect)
+                        target?.getBoundsInScreen(rect)
                         val startP = arg.start.calc(rect, service.screenWidth(), service.screenHeight())
                         val endP = arg.end?.calc(rect, service.screenWidth(), service.screenHeight()) ?: startP
                         if (startP != null && endP != null) {
@@ -441,15 +526,15 @@ class TaskRunner(private val service: DramaAccessibilityService) {
                 LogStore.log("  ↳ 「$label」滑动")
             }
             Action.InputText -> {
-                target.performAction(AccessibilityNodeInfo.ACTION_FOCUS)
+                target?.performAction(AccessibilityNodeInfo.ACTION_FOCUS)
                 LogStore.log("  ↳ 「$label」输入文本(聚焦;文本参数由 position/swipeArg 之外字段待扩展)")
             }
             Action.LaunchApp -> LogStore.log("  ↳ 「$label」启动应用(待实现)")
             Action.Check, Action.Uncheck -> {
-                val ok = target.performAction(
+                val ok = target?.performAction(
                     if (action == Action.Check) AccessibilityNodeInfo.ACTION_SELECT
                     else AccessibilityNodeInfo.ACTION_CLEAR_SELECTION,
-                )
+                ) == true
                 LogStore.log("  ↳ 「$label」${if (action == Action.Check) "勾选" else "取消勾选"}${if (ok) "" else "(失败)"}")
             }
             Action.None -> LogStore.log("  ↳ 「$label」匹配标记(无动作)")

@@ -97,6 +97,8 @@ data class GkdTask(
         val settleTime: Long = 0L,
         /** 超时未出现:continue = 跳过此步继续 / abort = 终止整个流 */
         val onTimeout: TimeoutPolicy = TimeoutPolicy.Abort,
+        /** 本地扩展:反向触发——目标节点不存在时执行动作,存在时跳过(不导出 GKD 订阅) */
+        val triggerOnAbsent: Boolean = false,
     ) {
         @Serializable
         enum class TimeoutPolicy {
@@ -136,6 +138,13 @@ data class GkdTask(
         val swipeArg: SwipeArg? = null,
         /** 本地扩展:1 = 上滑 2 = 下滑(编辑器/旧 scrollForward/scrollBackward),不导出 */
         val swipeDir: Int? = null,
+        /** 本地扩展:反向触发——目标节点不存在时执行动作,存在时跳过(不导出 GKD 订阅) */
+        val triggerOnAbsent: Boolean = false,
+        /**
+         * 本地扩展:触发事件类型(手动选择哪些 AccessibilityEvent 触发评估),不导出 GKD 订阅。
+         * 空列表 = 默认 windowStateChanged + windowContentChanged 双订阅。
+         */
+        val eventTypes: List<String> = emptyList(),
         val actionCd: Long = 0L,
         val actionDelay: Long = 0L,
         val fastQuery: Boolean = false,

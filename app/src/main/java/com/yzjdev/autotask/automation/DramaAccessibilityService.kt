@@ -194,6 +194,17 @@ open class DramaAccessibilityService : AccessibilityService() {
             AccessibilityEvent.TYPE_WINDOW_CONTENT_CHANGED ->
                 onContentChanged(packageName ?: "", event.className?.toString() ?: "")
 
+            // 其余事件类型(viewFocused/viewClicked/viewLongClicked/viewTextChanged)按需转发,
+            // 供订阅了对应 eventTypes 的规则评估;未订阅的规则会被 runner 过滤掉
+            AccessibilityEvent.TYPE_VIEW_FOCUSED ->
+                taskRunner.onEvent(packageName ?: "", lastActivity?.className ?: "", "viewFocused")
+            AccessibilityEvent.TYPE_VIEW_TEXT_CHANGED ->
+                taskRunner.onEvent(packageName ?: "", lastActivity?.className ?: "", "viewTextChanged")
+            AccessibilityEvent.TYPE_VIEW_CLICKED ->
+                taskRunner.onEvent(packageName ?: "", lastActivity?.className ?: "", "viewClicked")
+            AccessibilityEvent.TYPE_VIEW_LONG_CLICKED ->
+                taskRunner.onEvent(packageName ?: "", lastActivity?.className ?: "", "viewLongClicked")
+
             else -> Unit
         }
     }
@@ -257,8 +268,19 @@ open class DramaAccessibilityService : AccessibilityService() {
     /** 最近一次窗口事件的前台包名(onLeftPackage 检测用) */
     private var lastForegroundPkg: String? = null
 
-    /** 内容变化(列表滚动、按钮状态更新) */
-    open fun onContentChanged(packageName: String, className: String) {}
+    /** 内容变化去抖:按当前 Activity 重新评估订阅了 windowContentChanged 事件的规则 */
+    private val contentDebounce = Runnable {
+        val cn = lastActivity ?: return@Runnable
+        val pkg = cn.packageName ?: return@Runnable
+        taskRunner.onContentChanged(pkg, cn.className)
+    }
+
+    /** 内容变化:很多界面切换(对话框/弹窗/网页内跳转)只发 CONTENT 事件不发 STATE_CHANGED,
+     * 去抖 300ms 后按当前 Activity 重新评估订阅了 windowContentChanged 事件的规则 */
+    open fun onContentChanged(packageName: String, className: String) {
+        MAIN.removeCallbacks(contentDebounce)
+        MAIN.postDelayed(contentDebounce, 300)
+    }
 
     // ---- 节点遍历 ----
 
