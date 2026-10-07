@@ -198,6 +198,8 @@ import com.yzjdev.autotask.automation.GkdSubscription
 import com.yzjdev.autotask.automation.SubscriptionFetcher
 import com.yzjdev.autotask.automation.SubscriptionStore
 import com.yzjdev.autotask.automation.TaskStore
+import com.yzjdev.autotask.automation.NodeSnapshot
+import com.yzjdev.autotask.automation.NodeSnapshotCollector
 import com.yzjdev.autotask.ui.theme.AutoTaskTheme
 
 class MainActivity : ComponentActivity() {
@@ -1954,6 +1956,7 @@ private fun AllRulesPage(
     onPersistTasks: (List<GkdTask>) -> Unit,
     modifier: Modifier = Modifier,
 ) {
+    val context = LocalContext.current
     // 长按删除确认:记录待删除任务 id
     var pendingDeleteId by remember { mutableStateOf<String?>(null) }
     pendingDeleteId?.let { delId ->
@@ -2003,12 +2006,18 @@ private fun AllRulesPage(
         val visibleTasks = tasks.filter { it.packageName.isEmpty() || it.packageName in installedPkgs }
         // 分组:全局(packageName 空)/ 订阅(id 前缀 sub_)/ 自定义(其余),组内同名再合并
         val sections = listOf(
-            Triple("全局规则", visibleTasks.filter { it.packageName.isEmpty() }, "global"),
-            Triple("订阅规则", visibleTasks.filter { it.packageName.isNotEmpty() && it.isFromSubscription }, "sub"),
-            Triple("自定义规则", visibleTasks.filter { it.packageName.isNotEmpty() && !it.isFromSubscription }, "custom"),
-        ).filter { it.second.isNotEmpty() }
-        // 展开状态:默认全部收起;key = 分组 key
-        var expandedSections by rememberSaveable { mutableStateOf(setOf<String>()) }
+            RuleSection("全局规则", visibleTasks.filter { it.packageName.isEmpty() }, "global", Icons.Filled.Home),
+            RuleSection("订阅规则", visibleTasks.filter { it.packageName.isNotEmpty() && it.isFromSubscription }, "sub", Icons.Filled.CloudDownload),
+            RuleSection("自定义规则", visibleTasks.filter { it.packageName.isNotEmpty() && !it.isFromSubscription }, "custom", Icons.AutoMirrored.Filled.Rule),
+        ).filter { it.tasks.isNotEmpty() }
+        // 展开状态:默认全部收起;key = 分组 key,SharedPreferences 持久化(跨进程保留)
+        val sectionPrefs = context.getSharedPreferences("rules_ui", android.content.Context.MODE_PRIVATE)
+        var expandedSections by remember {
+            mutableStateOf(sectionPrefs.getStringSet("expanded_sections_all", emptySet())!!.toSet())
+        }
+        LaunchedEffect(expandedSections) {
+            sectionPrefs.edit().putStringSet("expanded_sections_all", expandedSections).apply()
+        }
 
         Box(modifier = Modifier.fillMaxSize()) {
             LazyColumn(
@@ -2017,41 +2026,40 @@ private fun AllRulesPage(
                 contentPadding = PaddingValues(start = 16.dp, end = 16.dp, bottom = 32.dp),
                 verticalArrangement = Arrangement.spacedBy(8.dp),
             ) {
-            sections.forEach { (sectionTitle, sectionTasks, sectionKey) ->
-                val expanded = sectionKey in expandedSections
-                item(key = "sec_$sectionKey", contentType = "section") {
+            sections.forEach { sec ->
+                val expanded = sec.key in expandedSections
+                item(key = "sec_${sec.key}", contentType = "section") {
                     SectionHeader(
-                        title = sectionTitle,
-                        count = sectionTasks.size,
+                        title = sec.title,
+                        count = sec.tasks.size,
                         expanded = expanded,
+                        icon = sec.icon,
                         onClick = {
-                            expandedSections = if (expanded) expandedSections - sectionKey
-                            else expandedSections + sectionKey
+                            expandedSections = if (expanded) expandedSections - sec.key
+                            else expandedSections + sec.key
                         },
-                    )
-                }
-                if (expanded) {
-                    // 组内同名合并(与原逻辑一致:全局规则优先排前)
-                    val merged = sectionTasks
-                        .groupBy { it.name.ifEmpty { it.actionsSummary } }
-                        .map { (title, list) ->
-                            Triple(title, list.filter { it.packageName.isEmpty() } + list.filter { it.packageName.isNotEmpty() }, list.any { it.enabled })
+                    ) {
+                        // 组内同名合并(与原逻辑一致:全局规则优先排前)
+                        val merged = sec.tasks
+                            .groupBy { it.name.ifEmpty { it.actionsSummary } }
+                            .map { (title, list) ->
+                                Triple(title, list.filter { it.packageName.isEmpty() } + list.filter { it.packageName.isNotEmpty() }, list.any { it.enabled })
+                            }
+                            .sortedWith(
+                                compareByDescending<Triple<String, List<GkdTask>, Boolean>> { it.second.first().packageName.isEmpty() }
+                                    .thenBy { it.first }
+                            )
+                        merged.forEach { (title, groupTasks, anyEnabled) ->
+                            MergedRuleCard(
+                                title = title,
+                                groupTasks = groupTasks,
+                                anyEnabled = anyEnabled,
+                                labelByPkg = labelByPkg,
+                                onToggleTask = onToggleTask,
+                                onEditTask = onEditTask,
+                                onLongPress = { pendingDeleteId = it },
+                            )
                         }
-                        .sortedWith(
-                            compareByDescending<Triple<String, List<GkdTask>, Boolean>> { it.second.first().packageName.isEmpty() }
-                                .thenBy { it.first }
-                        )
-                    items(merged.size, key = { "$sectionKey-${merged[it].first}" }, contentType = { "group" }) { i ->
-                        val (title, groupTasks, anyEnabled) = merged[i]
-                        MergedRuleCard(
-                            title = title,
-                            groupTasks = groupTasks,
-                            anyEnabled = anyEnabled,
-                            labelByPkg = labelByPkg,
-                            onToggleTask = onToggleTask,
-                            onEditTask = onEditTask,
-                            onLongPress = { pendingDeleteId = it },
-                        )
                     }
                 }
             }
@@ -2081,6 +2089,14 @@ private data class EditorSectionItem(
     val id: String,
     val title: String,
     val desc: String,
+    val icon: ImageVector,
+)
+
+/** 规则列表分组:标题 + 任务 + 分组 key + 图标(全局/订阅/自定义共用) */
+private data class RuleSection(
+    val title: String,
+    val tasks: List<GkdTask>,
+    val key: String,
     val icon: ImageVector,
 )
 
@@ -2637,41 +2653,89 @@ private fun ModeOptionCard(
     }
 }
 
-/** 规则页分组标题行:名称 + 条数 + 展开箭头,点按切换折叠 */
+/** 规则页分组标题行:与编辑器手风琴同款(圆底图标卡片 + 标题/条数 + 旋转箭头),点按切换折叠 */
 @Composable
 private fun SectionHeader(
     title: String,
     count: Int,
     expanded: Boolean,
+    icon: ImageVector,
     onClick: () -> Unit,
+    content: @Composable () -> Unit,
 ) {
-    Surface(
-        onClick = onClick,
+    val cs = MaterialTheme.colorScheme
+    val arrowRotation by animateFloatAsState(
+        targetValue = if (expanded) 180f else 0f,
+        animationSpec = spring(dampingRatio = 0.6f, stiffness = 400f),
+    )
+    Card(
         modifier = Modifier.fillMaxWidth(),
-        shape = MaterialTheme.shapes.medium,
-        color = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.35f),
+        colors = CardDefaults.cardColors(
+            containerColor = if (expanded) cs.primaryContainer.copy(alpha = 0.3f)
+            else cs.surfaceVariant.copy(alpha = 0.25f),
+        ),
+        shape = MaterialTheme.shapes.extraLarge,
+        elevation = CardDefaults.cardElevation(defaultElevation = 0.dp),
     ) {
+        Column {
         Row(
-            modifier = Modifier.padding(horizontal = 12.dp, vertical = 10.dp),
+            modifier = Modifier
+                .fillMaxWidth()
+                .clickable { onClick() }
+                .padding(start = 16.dp, end = 8.dp, top = 14.dp, bottom = 14.dp),
             verticalAlignment = Alignment.CenterVertically,
         ) {
+            Box(
+                modifier = Modifier
+                    .size(40.dp)
+                    .clip(CircleShape)
+                    .background(if (expanded) cs.primary else cs.secondaryContainer),
+                contentAlignment = Alignment.Center,
+            ) {
+                Icon(
+                    imageVector = icon,
+                    contentDescription = null,
+                    tint = if (expanded) cs.onPrimary else cs.onSecondaryContainer,
+                    modifier = Modifier.size(20.dp),
+                )
+            }
+            Spacer(Modifier.width(12.dp))
             Text(
                 text = title,
-                style = MaterialTheme.typography.titleSmall,
+                style = MaterialTheme.typography.titleMedium,
                 fontWeight = FontWeight.SemiBold,
                 modifier = Modifier.weight(1f),
             )
             Text(
                 text = "$count",
                 style = MaterialTheme.typography.labelSmall,
-                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                color = cs.onSurfaceVariant,
             )
-            Spacer(modifier = Modifier.width(6.dp))
             Icon(
-                imageVector = if (expanded) Icons.Filled.KeyboardArrowUp else Icons.Filled.KeyboardArrowDown,
+                imageVector = Icons.Filled.ExpandMore,
                 contentDescription = if (expanded) "收起" else "展开",
-                tint = MaterialTheme.colorScheme.onSurfaceVariant,
+                tint = cs.onSurfaceVariant,
+                modifier = Modifier
+                    .size(22.dp)
+                    .padding(end = 4.dp)
+                    .rotate(arrowRotation),
             )
+        }
+        // 展开区:与头部同一卡片,展开时显示内容(编辑器手风琴同款动画)
+        AnimatedVisibility(
+            visible = expanded,
+            enter = expandVertically(tween(200)),
+            exit = shrinkVertically(tween(200)),
+        ) {
+            Column(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .padding(start = 16.dp, end = 16.dp, top = 4.dp, bottom = 16.dp),
+                verticalArrangement = Arrangement.spacedBy(8.dp),
+            ) {
+                content()
+            }
+        }
         }
     }
 }
@@ -3038,8 +3102,14 @@ private fun TaskListPage(
             }
         }
 
-        // 分组展开状态:默认全部收起
-        var expandedSections by remember { mutableStateOf(setOf<String>()) }
+        // 分组展开状态:默认全部收起,SharedPreferences 持久化(按包名区分,跨进程保留)
+        val sectionPrefs = context.getSharedPreferences("rules_ui", android.content.Context.MODE_PRIVATE)
+        var expandedSections by remember {
+            mutableStateOf(sectionPrefs.getStringSet("expanded_sections_$pkg", emptySet())!!.toSet())
+        }
+        LaunchedEffect(expandedSections) {
+            sectionPrefs.edit().putStringSet("expanded_sections_$pkg", expandedSections).apply()
+        }
         LazyColumn(
             modifier = Modifier.fillMaxSize(),
             contentPadding = PaddingValues(start = 16.dp, end = 16.dp, bottom = 32.dp),
@@ -3057,26 +3127,24 @@ private fun TaskListPage(
 
             // 三大分组:全局 / 订阅 / 自定义,默认收起,点标题展开
             val sections = listOf(
-                Triple("全局规则", appTasks.filter { it.packageName.isEmpty() }, "global"),
-                Triple("订阅规则", appTasks.filter { it.packageName == pkg && it.isFromSubscription }, "sub"),
-                Triple("自定义规则", appTasks.filter { it.packageName == pkg && !it.isFromSubscription }, "custom"),
-            ).filter { it.second.isNotEmpty() }
-            sections.forEach { (sectionTitle, sectionTasks, sectionKey) ->
-                val expanded = sectionKey in expandedSections
-                item(key = "sec_$sectionKey", contentType = "section") {
+                RuleSection("全局规则", appTasks.filter { it.packageName.isEmpty() }, "global", Icons.Filled.Home),
+                RuleSection("订阅规则", appTasks.filter { it.packageName == pkg && it.isFromSubscription }, "sub", Icons.Filled.CloudDownload),
+                RuleSection("自定义规则", appTasks.filter { it.packageName == pkg && !it.isFromSubscription }, "custom", Icons.AutoMirrored.Filled.Rule),
+            ).filter { it.tasks.isNotEmpty() }
+            sections.forEach { sec ->
+                val expanded = sec.key in expandedSections
+                item(key = "sec_${sec.key}", contentType = "section") {
                     SectionHeader(
-                        title = sectionTitle,
-                        count = sectionTasks.size,
+                        title = sec.title,
+                        count = sec.tasks.size,
                         expanded = expanded,
+                        icon = sec.icon,
                         onClick = {
-                            expandedSections = if (expanded) expandedSections - sectionKey
-                            else expandedSections + sectionKey
+                            expandedSections = if (expanded) expandedSections - sec.key
+                            else expandedSections + sec.key
                         },
-                    )
-                }
-                if (expanded) {
-                    items(sectionTasks.size, key = { sectionTasks[it].id }, contentType = { "task" }) { i ->
-                        val task = sectionTasks[i]
+                    ) {
+                        sec.tasks.forEach { task ->
                         val accent = if (task.enabled) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.outlineVariant
                         // 全局规则用次要色容器底与普通应用规则区分
                         val isGlobal = task.packageName.isEmpty()
@@ -3167,9 +3235,10 @@ private fun TaskListPage(
                         )
                     }
                 }
-            }
+                    }
                 }
             }
+        }
 
             // 新建规则入口
             item {
@@ -3543,7 +3612,8 @@ private fun RuleEditorPage(
     // GKD 动作名
     var actionKind by remember { mutableStateOf(rule0?.action?.gkd ?: "click") }
     var actionMax by remember {
-        mutableStateOf((rule0?.actionMaximum?.takeIf { it > 0 } ?: 1L).toString())
+        // 0 = 不限(GKD 默认);仅编辑已有规则时回填其原值
+        mutableStateOf(rule0?.actionMaximum?.toString() ?: "0")
     }
     // 步骤模式:开启后本组为多步骤场景流(steps),单步表单收起
     var stepMode by remember { mutableStateOf(existing?.steps?.isNotEmpty() == true) }
@@ -3564,8 +3634,8 @@ private fun RuleEditorPage(
         )
     }
     var editingStepIdx by remember { mutableStateOf<Int?>(null) }
-    // 单页手风琴:当前展开的分组 id(单步规则下多个分组可同时展开,场景流下默认步骤组)
-    var expandedSections by remember { mutableStateOf(setOf("mode", "basic", if (existing?.steps?.isNotEmpty() == true) "steps" else "trigger", "action")) }
+    // 单页手风琴:当前展开的分组 id(默认全部折叠,用户逐组展开)
+    var expandedSections by remember { mutableStateOf(setOf<String>()) }
     // 分区列表:场景流/单步规则两种模式分组集不同
     val sections = remember(stepMode) {
         if (stepMode) listOf(
@@ -3671,7 +3741,7 @@ private fun RuleEditorPage(
         val excludeSel = parseSelectorList(excludeMatchesText)
         val excludeAllSel = parseSelectorList(excludeAllMatchesText)
         val action: Action = Action.entries.firstOrNull { it.gkd == actionKind } ?: Action.Click
-        val max = (actionMax.toLongOrNull() ?: 1L).coerceAtLeast(1L)
+        val max = (actionMax.toLongOrNull() ?: 0L).coerceAtLeast(0L)
         val preKeys = preKeysText.split(',', '，', ' ')
             .mapNotNull { it.trim().toLongOrNull() }
         val position = parsePositionExpr(positionText).first
@@ -3726,20 +3796,14 @@ private fun RuleEditorPage(
             "mode" -> {
                 ModeOptionCard(
                     selected = !stepMode,
-                    onClick = {
-                        stepMode = false
-                        expandedSections = expandedSections.minus("steps") + "trigger" + "action"
-                    },
+                    onClick = { stepMode = false },
                     title = "单步规则",
                     desc = "一个条件 + 一个动作",
                     icon = Icons.AutoMirrored.Filled.Rule,
                 )
                 ModeOptionCard(
                     selected = stepMode,
-                    onClick = {
-                        stepMode = true
-                        expandedSections = expandedSections.filter { it in setOf("mode", "basic", "steps") }.toSet()
-                    },
+                    onClick = { stepMode = true },
                     title = "多步骤场景流",
                     desc = "按序执行,适合多步操作场景",
                     icon = Icons.Filled.PlayCircle,
@@ -3762,24 +3826,46 @@ private fun RuleEditorPage(
                         )
                     }
                     "trigger" -> {
-                        ExprField(
-                            value = matchesText,
-                            onChange = { matchesText = it },
-                            title = "matches(GKD 选择器,全部命中;每行一条)",
-                            note = "例: [text*=\"跳过\"][clickable=true];动作目标 = 最后一行",
-                            monospace = true,
-                            maxLines = 4,
-                            error = validation.errors["trigger"]?.firstOrNull { it.startsWith("matches") },
-                        )
-                        ExprField(
-                            value = anyMatchesText,
-                            onChange = { anyMatchesText = it },
-                            title = "anyMatches(任一命中即可;每行一条)",
-                            note = "与 matches 二选一;都填时仍以 matches 为准",
-                            monospace = true,
-                            maxLines = 4,
-                            error = validation.errors["trigger"]?.firstOrNull { it.startsWith("anyMatches") },
-                        )
+                        // 触发选择器二选一切换:matches(全部命中)/ anyMatches(任一命中)
+                        var matchMode by remember(existing?.id) {
+                            mutableStateOf(if (rule0?.anyMatches?.isNotEmpty() == true && rule0.matches.isEmpty()) 1 else 0)
+                        }
+                        Row(
+                            modifier = Modifier.horizontalScroll(rememberScrollState()),
+                            horizontalArrangement = Arrangement.spacedBy(8.dp),
+                        ) {
+                            listOf(
+                                "matches(全部命中)" to 0,
+                                "anyMatches(任一命中)" to 1,
+                            ).forEach { (label, mode) ->
+                                ChoiceChip(
+                                    selected = matchMode == mode,
+                                    onClick = { matchMode = mode },
+                                    label = label,
+                                )
+                            }
+                        }
+                        if (matchMode == 0) {
+                            ExprField(
+                                value = matchesText,
+                                onChange = { matchesText = it },
+                                title = "matches(GKD 选择器,全部命中;每行一条)",
+                                note = "例: [text*=\"跳过\"][clickable=true];动作目标 = 最后一行",
+                                monospace = true,
+                                maxLines = 4,
+                                error = validation.errors["trigger"]?.firstOrNull { it.startsWith("matches") },
+                            )
+                        } else {
+                            ExprField(
+                                value = anyMatchesText,
+                                onChange = { anyMatchesText = it },
+                                title = "anyMatches(GKD 选择器,任一命中即可;每行一条)",
+                                note = "例: [text*=\"跳过\"][clickable=true];动作目标 = 最后一行",
+                                monospace = true,
+                                maxLines = 4,
+                                error = validation.errors["trigger"]?.firstOrNull { it.startsWith("anyMatches") },
+                            )
+                        }
                         // 常用选择器片段:点按插入到 matches 末尾
                         Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
                             Text(
@@ -3804,24 +3890,46 @@ private fun RuleEditorPage(
                                 }
                             }
                         }
-                        ExprField(
-                            value = excludeMatchesText,
-                            onChange = { excludeMatchesText = it },
-                            title = "excludeMatches(存在一个命中即跳过本规则;每行一条)",
-                            note = "例: [vid=\"close_btn\"] 存在时不执行",
-                            monospace = true,
-                            maxLines = 4,
-                            error = validation.errors["trigger"]?.firstOrNull { it.startsWith("excludeMatches") },
-                        )
-                        ExprField(
-                            value = excludeAllMatchesText,
-                            onChange = { excludeAllMatchesText = it },
-                            title = "excludeAllMatches(全部命中才跳过本规则;每行一条)",
-                            note = "与 excludeMatches 的区别:AND 语义,全部存在才拦截",
-                            monospace = true,
-                            maxLines = 4,
-                            error = validation.errors["trigger"]?.firstOrNull { it.startsWith("excludeAllMatches") },
-                        )
+                        // 排除选择器二选一切换:excludeMatches(存在一个即跳过)/ excludeAllMatches(全部命中才跳过)
+                        var excludeMode by remember(existing?.id) {
+                            mutableStateOf(if (rule0?.excludeAllMatches?.isNotEmpty() == true && rule0.excludeMatches.isEmpty()) 1 else 0)
+                        }
+                        Row(
+                            modifier = Modifier.horizontalScroll(rememberScrollState()),
+                            horizontalArrangement = Arrangement.spacedBy(8.dp),
+                        ) {
+                            listOf(
+                                "excludeMatches(存在一个即跳过)" to 0,
+                                "excludeAllMatches(全部命中才跳过)" to 1,
+                            ).forEach { (label, mode) ->
+                                ChoiceChip(
+                                    selected = excludeMode == mode,
+                                    onClick = { excludeMode = mode },
+                                    label = label,
+                                )
+                            }
+                        }
+                        if (excludeMode == 0) {
+                            ExprField(
+                                value = excludeMatchesText,
+                                onChange = { excludeMatchesText = it },
+                                title = "excludeMatches(GKD 选择器,存在一个命中即跳过本规则;每行一条)",
+                                note = "例: [vid=\"close_btn\"] 存在时不执行",
+                                monospace = true,
+                                maxLines = 4,
+                                error = validation.errors["trigger"]?.firstOrNull { it.startsWith("excludeMatches") },
+                            )
+                        } else {
+                            ExprField(
+                                value = excludeAllMatchesText,
+                                onChange = { excludeAllMatchesText = it },
+                                title = "excludeAllMatches(GKD 选择器,全部命中才跳过本规则;每行一条)",
+                                note = "与 excludeMatches 的区别:AND 语义,全部存在才拦截",
+                                monospace = true,
+                                maxLines = 4,
+                                error = validation.errors["trigger"]?.firstOrNull { it.startsWith("excludeAllMatches") },
+                            )
+                        }
                         RuleTriggerSection(
                             selectedTypes = selectedEventTypes,
                             onTypesChange = { selectedEventTypes = it },
@@ -3856,6 +3964,7 @@ private fun RuleEditorPage(
                             value = actionMax,
                             onChange = { actionMax = it },
                             title = "actionMaximum(执行次数)",
+                            note = "0 = 不限次数(GKD 默认);填 1 = 只执行一次,配合 resetMatch 决定何时重置",
                             singleLine = true,
                             numeric = true,
                         )
@@ -3968,6 +4077,16 @@ private fun RuleEditorPage(
                                     )
                                 }
                             }
+                            InfoNote(
+                                when (resetMatchKind) {
+                                    GkdTask.ResetMatch.App ->
+                                        "离开本应用即清除执行次数与匹配窗,下次进入重新计"
+                                    GkdTask.ResetMatch.Activity ->
+                                        "每次 Activity 切换即清执行次数与匹配窗(同页 1 秒去抖);注意:同 Activity 内界面变化不重置,限次规则在此页内点满即休眠"
+                                    GkdTask.ResetMatch.Match ->
+                                        "按 activityIds 判断:从「不在匹配页」切到「在匹配页」时清执行次数;activityIds 留空 = 任意 Activity 变化都清"
+                                }
+                            )
                         }
                         SwitchRow(
                             checked = fastQueryOn,
@@ -3981,7 +4100,7 @@ private fun RuleEditorPage(
                             label = "matchRoot",
                             desc = "选择器从根节点开始匹配",
                         )
-                        InfoNote("GKD 语义:matches 命中的节点即动作目标;back / swipe 为全局动作,无需选择器。")
+                        InfoNote("本地扩展 nodeIndex:选择器属性 [nodeIndex=5] = 点悬浮窗 NODE 5 节点,可与 text/vid 等属性同段使用。")
                     }
                     "steps" -> {
                         val updateDraft: (Int, (StepDraft) -> StepDraft) -> Unit = { i, transform ->
@@ -4028,9 +4147,10 @@ private fun RuleEditorPage(
     }
 
     Column(modifier = modifier.fillMaxSize()) {
-        // 顶栏:返回 + 标题/副标题 + 保存状态徽标
+        // 顶栏:返回 + 标题/副标题 + 属性查看 + 保存状态徽标
         val cs = MaterialTheme.colorScheme
         val topTitle = if (existing == null) "新建任务" else "编辑任务"
+        var showNodeProps by remember { mutableStateOf(false) }
         Row(
             modifier = Modifier
                 .fillMaxWidth()
@@ -4066,6 +4186,17 @@ private fun RuleEditorPage(
                     overflow = TextOverflow.Ellipsis,
                 )
             }
+            // 属性查看:列出当前屏幕节点快照(NODE 编号 + 摘要),点行复制 [nodeIndex=n]
+            Surface(
+                onClick = { showNodeProps = true },
+                shape = CircleShape,
+                color = cs.surfaceVariant.copy(alpha = 0.5f),
+                modifier = Modifier.size(40.dp),
+            ) {
+                Box(contentAlignment = Alignment.Center) {
+                    Icon(Icons.Filled.Layers, contentDescription = "属性查看")
+                }
+            }
             Surface(
                 color = if (validation.ok) cs.primaryContainer else cs.errorContainer,
                 contentColor = if (validation.ok) cs.onPrimaryContainer else cs.onErrorContainer,
@@ -4089,6 +4220,10 @@ private fun RuleEditorPage(
             }
         }
         HorizontalDivider(color = cs.outlineVariant.copy(alpha = 0.4f))
+
+        if (showNodeProps) {
+            NodePropsDialog(onDismiss = { showNodeProps = false })
+        }
 
         // 手风琴正文:滚动区
         LazyColumn(
@@ -4148,6 +4283,90 @@ private fun RuleEditorPage(
             }
         }
     }
+}
+
+/**
+ * 选择器属性参考弹窗:列出规则选择器支持的全部属性及说明。
+ */
+@Composable
+private fun NodePropsDialog(onDismiss: () -> Unit) {
+    // 名称 → (类型, 说明)
+    val props = listOf(
+        "name" to ("文本" to "完整类名,如 android.widget.TextView"),
+        "text" to ("文本" to "节点文本"),
+        "desc" to ("文本" to "contentDescription"),
+        "vid" to ("文本" to "viewId 资源名,如 close_btn"),
+        "id" to ("文本" to "完整 viewId,如 com.xx:id/close"),
+        "nodeIndex" to ("数值" to "本地扩展:悬浮窗节点编号(1 基),如 [nodeIndex=5]"),
+        "clickable" to ("布尔" to "可点击"),
+        "longClickable" to ("布尔" to "可长按"),
+        "checkable" to ("布尔" to "可勾选"),
+        "checked" to ("布尔" to "已勾选"),
+        "editable" to ("布尔" to "可编辑"),
+        "focusable" to ("布尔" to "可聚焦"),
+        "visibleToUser" to ("布尔" to "用户可见"),
+        "left" to ("数值" to "屏幕边界左"),
+        "top" to ("数值" to "屏幕边界上"),
+        "right" to ("数值" to "屏幕边界右"),
+        "bottom" to ("数值" to "屏幕边界下"),
+        "width" to ("数值" to "宽度"),
+        "height" to ("数值" to "高度"),
+        "index" to ("数值" to "兄弟节点序号(0 基)"),
+        "depth" to ("数值" to "距根深度"),
+        "childCount" to ("数值" to "子节点数"),
+    )
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        title = { Text("支持的属性") },
+        text = {
+            LazyColumn(
+                modifier = Modifier.height(420.dp),
+                verticalArrangement = Arrangement.spacedBy(2.dp),
+            ) {
+                items(props.size) { i ->
+                    val (name, doc) = props[i]
+                    Row(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .padding(vertical = 3.dp),
+                        verticalAlignment = Alignment.Top,
+                    ) {
+                        Text(
+                            text = name,
+                            style = MaterialTheme.typography.labelMedium,
+                            color = MaterialTheme.colorScheme.primary,
+                            modifier = Modifier.width(96.dp),
+                        )
+                        Column {
+                            Text(
+                                text = doc.first,
+                                style = MaterialTheme.typography.labelSmall,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                            )
+                            Text(
+                                text = doc.second,
+                                style = MaterialTheme.typography.bodySmall,
+                            )
+                        }
+                    }
+                }
+                item {
+                    Text(
+                        text = "用法: [text*=\"跳过\"][clickable=true];比较符 = != > < ^= $= *= ~=(正则)",
+                        style = MaterialTheme.typography.labelSmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    )
+                    Text(
+                        text = "matches(全部命中才触发)与 anyMatches(任一命中即触发)独立判定;excludeMatches(存在即不触发)与 excludeAllMatches(全部存在才不触发)为排除条件",
+                        style = MaterialTheme.typography.labelSmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        modifier = Modifier.padding(top = 4.dp),
+                    )
+                }
+            }
+        },
+        confirmButton = { TextButton(onClick = onDismiss) { Text("关闭") } },
+    )
 }
 
 /** 远程订阅管理弹窗:URL 列表 / 添加 / 刷新 / 删除,拉取后解析合并进规则表(GKD 订阅同款) */

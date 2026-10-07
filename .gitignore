@@ -1,11 +1,20 @@
+# Gradle / Kotlin 构建产物
 .gradle/
 .kotlin/
 build/
-local.properties
 
-# 本地工具产物 / 截图 / 密钥 / 安装包,不入库
+# IDE
+.idea/
+*.iml
+.DS_Store
+
+# 本地配置 / 密钥 / 安装包
+local.properties
+*.jks
+*.keystore
+
+# 本地工具产物 / 截图
 .atomcode/
 .m3inspect/
 screenshots/
 *.deb
-release.keystore

@@ -31,12 +31,19 @@ class TaskRunner(private val service: DramaAccessibilityService) {
     private class ExecState {
         var count = 0L            // actionMaximum 计数
         var lastAt = 0L           // 上次执行时刻(actionCd / preKeys 依据)
-        var matchSince = 0L       // 本轮匹配起点(matchTime 窗口起点)
+        var matchSince = 0L       // 最近一次重置时刻(GKD matchChangedTime:matchTime/forcedTime/priorityTime 窗口起点)
         var priorityLeft = 0L     // 优先级剩余次数(priorityActionMaximum)
-        var wasMatching = false   // resetMatch=match 的失配→匹配检测
     }
 
     private val execStates = HashMap<String, ExecState>()
+
+    /** GKD updateTopActivity 同 Activity 去抖:≥1s 才再走一次跃迁重置 */
+    private var lastResetActivityKey: String? = null
+    private var lastResetActivityAt = 0L
+
+    /** 上一真实 Activity(pkg/cls):resetMatch=match 计算 previouslyMatched 用 */
+    private var prevResetPkg: String? = null
+    private var prevResetActivity: String? = null
     private var tasks: List<GkdTask> = emptyList()
     private var bootAt = 0L
 
@@ -77,15 +84,19 @@ class TaskRunner(private val service: DramaAccessibilityService) {
                     // 多步骤编排组:forcedTime 窗口内轮询触发场景流
                     val steps = task.steps
                     if (steps != null && steps.isNotEmpty()) {
-                        if (task.forcedTime > 0 && now - bootAt <= task.forcedTime) {
+                        // GKD checkForced:窗口起点 = matchChangedTime(最近一次重置,无记录则用 bootAt)
+                        val since = execStates["${task.id}|scene"]?.matchSince?.takeIf { it > 0 } ?: bootAt
+                        if (task.forcedTime > 0 && now - since <= task.forcedTime) {
                             tryLaunchScene(task, steps, root, now)
                         }
                         continue
                     }
                     for (rule in task.rules) {
                         val ft = groupOr(task.forcedTime, rule.forcedTime)
-                        if (ft <= 0 || now - bootAt > ft) continue
                         val s = state(task, rule)
+                        // GKD checkForced:now < matchChangedTime + matchDelay + forcedTime
+                        val since = s.matchSince.takeIf { it > 0 } ?: bootAt
+                        if (ft <= 0 || now - since > ft) continue
                         if (!schedulable(task, rule, s, now)) continue
                         if (!preKeysOk(task, rule, s, now)) continue
                         if (ruleMatches(root, rule)) launchRule(task, rule, s, now, "forcedTime")
@@ -95,9 +106,58 @@ class TaskRunner(private val service: DramaAccessibilityService) {
         }
     }
 
-    /** Activity 切换入口:由服务的 TYPE_WINDOW_STATE_CHANGED 调用 */
+    /** Activity 变化入口:由服务的 TYPE_WINDOW_STATE_CHANGED 确认真实 Activity 后调用 */
     fun onActivityChanged(packageName: String, activityName: String) {
+        val now = System.currentTimeMillis()
+        // GKD updateTopActivity:isSame && t - lastActivityUpdateTime < 1000 直接 return(同 Activity 去抖 1s)
+        val key = "$packageName/$activityName"
+        val isSameActivity = key == lastResetActivityKey
+        synchronized(this) {
+            if (isSameActivity && now - lastResetActivityAt < 1000) {
+                evaluateRules(packageName, activityName, eventType = "windowStateChanged")
+                return
+            }
+            lastResetActivityKey = key
+            lastResetActivityAt = now
+        }
+        // 跃迁重置,对齐 GKD onActivityTransition:
+        //  - activity 策略:无条件清
+        //  - match 策略:previouslyMatched = 本规则 activityIds 命中「上一 Activity」→ 未命中才清
+        //  - app 策略:换应用才清(onLeftPackage)
+        val prevPkg = prevResetPkg
+        val prevAct = prevResetActivity
+        synchronized(this) {
+            prevResetPkg = packageName
+            prevResetActivity = activityName
+        }
+        for (task in tasks) {
+            if (!task.enabled) continue
+            if (task.packageName.isNotEmpty() && task.packageName != packageName) continue
+            val hasMatchType = task.resetMatch == GkdTask.ResetMatch.Match ||
+                task.rules.any { it.resetMatch == GkdTask.ResetMatch.Match }
+            if (task.resetMatch == GkdTask.ResetMatch.Activity && !hasMatchType) {
+                resetExecCounters(task, now)
+                continue
+            }
+            if (hasMatchType) {
+                // previouslyMatched:任一 match 策略规则的 activityIds 命中上一 Activity(空 = 全部命中)
+                val matched = task.rules.filter { resetMatchOf(task, it) == GkdTask.ResetMatch.Match }
+                    .any { rule -> activityMatch(rule.activityIds.ifEmpty { task.activityIds }, prevAct ?: "") && prevPkg == packageName }
+                if (!matched) resetExecCounters(task, now)
+            }
+        }
         evaluateRules(packageName, activityName, eventType = "windowStateChanged")
+    }
+
+    /** 清空一个任务下全部规则/场景的执行计数并刷新匹配窗起点(不动 lastAt,对齐 GKD resetState) */
+    private fun resetExecCounters(task: GkdTask, now: Long) {
+        val prefix = "${task.id}|"
+        for ((k, s) in execStates) {
+            if (k.startsWith(prefix)) {
+                s.count = 0
+                s.matchSince = now
+            }
+        }
     }
 
     /** 窗口内容变化入口:由服务的 TYPE_WINDOW_CONTENT_CHANGED 去抖后调用 */
@@ -171,6 +231,10 @@ class TaskRunner(private val service: DramaAccessibilityService) {
     private fun groupOr(taskV: Long, ruleV: Long, default: Long = 0L): Long =
         if (ruleV != 0L) ruleV else if (taskV != 0L) taskV else default
 
+    /** GKD resetMatch 语义:规则级覆盖组级(rule.resetMatch ?: group.resetMatch,默认 activity) */
+    private fun resetMatchOf(task: GkdTask, rule: GkdTask.Rule): GkdTask.ResetMatch =
+        rule.resetMatch ?: task.resetMatch
+
     private fun groupOrBool(taskV: Boolean, ruleV: Boolean): Boolean = ruleV || taskV
 
     /** 调度准入:休眠(次数/时间窗)+ 冷却 + 优先级时间窗 */
@@ -187,12 +251,13 @@ class TaskRunner(private val service: DramaAccessibilityService) {
         return true
     }
 
-    /** 优先级状态:priorityTime 窗内且优先次数未用完 */
+    /** 优先级状态:priorityTime 窗内(起点 = matchSince,对齐 GKD isPriority 的 matchChangedTime)且优先次数未用完 */
     private fun priorityActive(task: GkdTask, rule: GkdTask.Rule, s: ExecState, now: Long): Boolean {
         val pt = groupOr(task.priorityTime, rule.priorityTime)
         if (pt <= 0) return false
         val pMax = groupOr(task.priorityActionMaximum, rule.priorityActionMaximum, 1L)
-        return bootAt > 0 && now - bootAt <= pt && s.priorityLeft != -1L && s.count < pMax
+        val since = s.matchSince.takeIf { it > 0 } ?: bootAt
+        return since > 0 && now - since <= pt && s.priorityLeft != -1L && s.count < pMax
     }
 
     /** preKeys:要求的 key 刚刚执行过(lastAt 晚于本规则上次执行) */

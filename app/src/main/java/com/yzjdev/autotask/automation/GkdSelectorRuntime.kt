@@ -393,6 +393,8 @@ internal class SelectorProgram private constructor(private val expression: Selec
         "depth" -> generateSequence(node.parent) { it.parent }.count()
         "childCount" -> node.childCount
         "parent" -> getParent(node)
+        // 本地扩展:节点在悬浮窗快照中的 NODE 编号(1 基,与悬浮窗显示一致);未收录 = 0
+        "nodeIndex" -> NodeSnapshotCollector.snapshotIndexOf(node)
         else -> null
     }
 

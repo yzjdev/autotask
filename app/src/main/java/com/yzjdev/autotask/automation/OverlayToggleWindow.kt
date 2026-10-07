@@ -20,16 +20,19 @@ import android.widget.TextView
  *
  *  - 显示十字准星(未开启)/ 叉号(抓取中)两种状态图标
  *  - 可整屏拖动(带拖动 vs 点击的位移阈值判定)
- *  - 点击触发 [onToggle] 回调,开关状态由持有方维护,通过 [setActive] 回填图标
+ *  - 点击触发 [onToggle] 回调,长按触发 [onLongPress] 关闭整个悬浮窗
+ *  - 开关状态由持有方维护,通过 [setActive] 回填图标
  *  - TYPE_ACCESSIBILITY_OVERLAY:无需悬浮窗权限
  */
 class OverlayToggleWindow(
     private val service: AccessibilityService,
     private val onToggle: () -> Unit,
+    private val onLongPress: () -> Unit,
 ) {
 
     companion object {
         private const val DRAG_SLOP_PX = 12     // 拖动 vs 点击的位移阈值
+        private const val LONG_PRESS_TIMEOUT = 400L
         private const val BALL_SIZE_DP = 44     // 悬浮球直径
     }
 
@@ -102,13 +105,23 @@ class OverlayToggleWindow(
         var downX = 0f; var downY = 0f
         var startX = 0; var startY = 0
         var dragging = false
+        var longPressFired = false
+        val longPressRunnable = Runnable {
+            if (!dragging) {
+                longPressFired = true
+                ball.pressedState = false
+                onLongPress()
+            }
+        }
         ball.setOnTouchListener { _, e ->
             when (e.actionMasked) {
                 MotionEvent.ACTION_DOWN -> {
                     downX = e.rawX; downY = e.rawY
                     startX = lp.x; startY = lp.y
                     dragging = false
+                    longPressFired = false
                     ball.pressedState = true
+                    mainHandler.postDelayed(longPressRunnable, LONG_PRESS_TIMEOUT)
                     // 不消费:若最终是点击,让 onClick 正常触发
                     false
                 }
@@ -117,6 +130,7 @@ class OverlayToggleWindow(
                     if (dragging || dx * dx + dy * dy > DRAG_SLOP_PX * DRAG_SLOP_PX) {
                         if (!dragging) {
                             dragging = true
+                            mainHandler.removeCallbacks(longPressRunnable)
                             ball.pressedState = false
                             ball.dragging = true   // 拖拽中显示光晕
                         }
@@ -128,11 +142,13 @@ class OverlayToggleWindow(
                     dragging  // 拖动中消费 MOVE
                 }
                 MotionEvent.ACTION_UP, MotionEvent.ACTION_CANCEL -> {
+                    mainHandler.removeCallbacks(longPressRunnable)
                     val wasDragging = dragging
                     dragging = false
                     ball.pressedState = false
                     ball.dragging = false
-                    wasDragging  // 拖动结束消费 UP,抑制 onClick;点按则放行触发 onClick
+                    // 长按已触发则消费 UP,抑制 onClick
+                    wasDragging || longPressFired
                 }
                 else -> dragging
             }

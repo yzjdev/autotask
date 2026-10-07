@@ -177,15 +177,23 @@ open class DramaAccessibilityService : AccessibilityService() {
         when (event.eventType) {
             AccessibilityEvent.TYPE_WINDOW_STATE_CHANGED -> {
                 val className = event.className?.toString() ?: ""
-                // 过滤非 Activity 窗口(Dialog/PopupWindow/输入法等):
-                // 先用前缀粗筛,再用 PackageManager.getActivityInfo 精确反查,
-                // 只有真实注册的 Activity 才视为前台切换
+                // 对齐 GKD A11yState.updateTopActivity:真实 Activity 才记录并回填,
+                // 非真实 Activity(Dialog/输入法等)沿用该应用最近一次有效 Activity 名,
+                // 保证规则 activityIds 匹配不因窗口类名失效
                 if (packageName != null && isActivityClassName(className) && isRealActivity(packageName, className)) {
                     val cn = ComponentName(packageName, className)
                     lastActivity = cn
+                    recordValidActivity(cn)
                     notifyActivityChanged(cn)
+                    onWindowChanged(packageName, className)
+                } else {
+                    // 非 Activity 窗口(Dialog/输入法):只驱动评估,不触发 resetMatch 重置
+                    taskRunner.onEvent(
+                        packageName ?: "",
+                        lastValidActivityByApp[packageName]?.className ?: className,
+                        "windowStateChanged",
+                    )
                 }
-                onWindowChanged(packageName ?: "", className)
             }
 
             AccessibilityEvent.TYPE_WINDOW_CONTENT_CHANGED ->
@@ -213,6 +221,19 @@ open class DramaAccessibilityService : AccessibilityService() {
     var lastActivity: ComponentName? = null
         private set
 
+    /** 各应用最近一次确认的真实 Activity(非 Activity 窗口事件时按包名回填,对齐 GKD lastValidActivity) */
+    private val lastValidActivityByApp = HashMap<String, ComponentName>()
+
+    private fun recordValidActivity(cn: ComponentName) {
+        synchronized(lastValidActivityByApp) {
+            lastValidActivityByApp[cn.packageName ?: ""] = cn
+        }
+    }
+
+    fun getValidActivity(pkg: String): ComponentName? = synchronized(lastValidActivityByApp) {
+        lastValidActivityByApp[pkg]
+    }
+
     /** lastActivity 变化监听(悬浮窗标题实时跟随前台 Activity) */
     private val activityListeners = CopyOnWriteArrayList<(ComponentName) -> Unit>()
 
@@ -236,11 +257,15 @@ open class DramaAccessibilityService : AccessibilityService() {
             !cls.startsWith("android.view") &&
             cls != "android.widget.FrameLayout"
 
+    /** getActivityInfo 反查结果 LRU 缓存(对齐 GKD ActivityCache):避免高频事件下重复 binder 反查 */
+    private val activityCache = android.util.LruCache<Pair<String, String>, Boolean>(256)
+
     /** getActivityInfo 反查:确认 pkg/cls 确实是已注册的 Activity(非 Activity 窗口会抛异常) */
-    private fun isRealActivity(pkg: String, cls: String): Boolean = runCatching {
-        packageManager.getActivityInfo(ComponentName(pkg, cls), 0)
-        true // getActivityInfo 未抛异常即为已注册(返回值恒非 null)
-    }.getOrDefault(false)
+    private fun isRealActivity(pkg: String, cls: String): Boolean = activityCache.get(pkg to cls)
+        ?: runCatching {
+            packageManager.getActivityInfo(ComponentName(pkg, cls), 0)
+            true // getActivityInfo 未抛异常即为已注册(返回值恒非 null)
+        }.getOrDefault(false).also { activityCache.put(pkg to cls, it) }
 
     /** 窗口切换(进入新页面 / 播放页):先驱动任务引擎,再留给子类扩展 */
     open fun onWindowChanged(packageName: String, className: String) {
@@ -250,6 +275,7 @@ open class DramaAccessibilityService : AccessibilityService() {
             lastForegroundPkg = packageName
             if (prev != null) taskRunner.onLeftPackage(prev)
         }
+        // GKD updateTopActivity:同 Activity 的 STATE_CHANGED 也去抖后走 resetMatch 重置
         taskRunner.onActivityChanged(packageName, className)
     }
 

@@ -34,7 +34,6 @@ import android.widget.TextView
 class OverlayDebugWindow(private val service: AccessibilityService) {
 
     companion object {
-        private const val MAX_NODES = 300       // 快照最多收集的节点数
         private const val MAX_INFO_LINES = 24   // 信息卡片最多行数
     }
 
@@ -42,8 +41,8 @@ class OverlayDebugWindow(private val service: AccessibilityService) {
     private val wm by lazy { service.getSystemService(WindowManager::class.java) }
     private val mainHandler = Handler(Looper.getMainLooper())
 
-    // 开关悬浮球:独立 UI,点击回调切换抓取状态
-    private val toggleWindow = OverlayToggleWindow(service) { toggleCapture() }
+    // 开关悬浮球:独立 UI,点击回调切换抓取状态,长按关闭整个悬浮窗
+    private val toggleWindow = OverlayToggleWindow(service, { toggleCapture() }, { hide() })
 
     private var cardView: LinearLayout? = null
     private var titleView: TextView? = null
@@ -105,27 +104,26 @@ class OverlayDebugWindow(private val service: AccessibilityService) {
         private set
 
     /** 抓取时的节点快照(节点树会失效,必须立即转为数据) */
-    private class NodeSnapshot(
-        val rect: Rect,
-        val clickable: Boolean,
-        val info: String,                     // 摘要(一行)
-        val table: Map<String, String>,       // 详细信息(表格:属性名 → 值)
-        val parent: Int,                      // 父节点下标,-1 为根
-        val children: List<Int>,
-    )
-
     private var snapshots: List<NodeSnapshot> = emptyList()
     private var selectedIndex = -1
 
     /** 最近一次抓取的应用名(卡片被 ✕ 关闭后重建标题栏用) */
     private var lastAppName = ""
 
+    /** 本次抓取的窗口根包名:标题只接受与之一致的 Activity 来源,防桌面/系统窗口污染 */
+    @Volatile
+    private var capturePkg: String? = null
+
     /**
      * 订阅服务层的 lastActivity:每次前台 Activity 切换(经 getActivityInfo 反查确认)
      * 即同步更新悬浮窗标题,无需用户重新抓取节点。
      */
     private val activityListener: (android.content.ComponentName) -> Unit = { cn ->
-        mainHandler.post { applyHeader(cn) }
+        mainHandler.post {
+            // 只跟随与当前抓取窗口同包名的 Activity;桌面/Launcher 是合法 Activity,
+            // 但若当前抓的不是桌面,不能让标题跳回桌面
+            if (capturePkg == null || cn.packageName == capturePkg) applyHeader(cn)
+        }
     }
 
     /** 标题格式:应用名(包名/Activity 短类名) */
@@ -405,33 +403,26 @@ class OverlayDebugWindow(private val service: AccessibilityService) {
     /** 抓取当前窗口节点树:绘制边界框 + 选中根节点 */
     private fun captureAndShow() {
         try {
-            val list = ArrayList<NodeSnapshot>()
-            val root = service.rootInActiveWindow ?: run {
+            val list = NodeSnapshotCollector.collect(service)
+            // GKD 用 rootInActiveWindow.packageName 做 appId,但抓取瞬间该值可能已指向
+            // 桌面/系统窗口;无 Shizuku 校验,改用「焦点应用窗口」做基准(更接近真实前台)
+            val anchor = service.windows.firstOrNull {
+                it.isFocused && it.type == android.view.accessibility.AccessibilityWindowInfo.TYPE_APPLICATION
+            }?.root ?: service.rootInActiveWindow
+            val root = anchor ?: run {
                 snapshots = emptyList()
                 selectedIndex = -1
                 return
             }
-            // 标题:立即显示(不等待查询)——事件缓存的 Activity 须与当前窗口包名一致才可信
-            // (刚切换应用、事件未到时缓存是上一个应用的,GKD 同款包名校验),否则用窗口包名占位
+            val appId = root.packageName?.toString() ?: "Unknown"
+            // GKD resolveActivityId 语义:appId 以无障碍根节点包名为准,
+            // 标题先显示,后台轮询到「系统侧前台包名 == 根节点包名」才更新 Activity 名
             captureGeneration++
-            val cached = (service as? com.yzjdev.autotask.automation.DramaAccessibilityService)?.lastActivity
-                ?.takeIf { it.packageName == root.packageName }
-            val title = cached?.let { formatTitle(it) }
-                ?: root.packageName?.let { pkg -> "$pkg(未知 Activity)" }
-                ?: "Unknown"
+            capturePkg = appId
+            val svc = service as? com.yzjdev.autotask.automation.DramaAccessibilityService
+            val title = svc?.getValidActivity(appId)?.let { formatTitle(it) }
+                ?: "$appId(未知 Activity)"
             lastAppName = title
-            traverseSnapshot(root, -1, list)
-            // 悬浮窗(TYPE_APPLICATION_OVERLAY 等)不在 rootInActiveWindow 内,
-            // 遍历所有可交互窗口,把除活动窗口之外的根节点也并入快照;
-            // 本应用自己的悬浮窗(悬浮球/信息卡片/绘制层)同样走无障碍窗口通道,
-            // 按包名跳过,避免绘制层把球和卡片自己也框出来
-            for (w in service.windows) {
-                val wr = w.root ?: continue
-                if (wr.packageName == service.packageName) continue
-                if (wr.packageName == root.packageName && w.type ==
-                    android.view.accessibility.AccessibilityWindowInfo.TYPE_APPLICATION) continue
-                traverseSnapshot(wr, -1, list)
-            }
             snapshots = list
             ensureBoundsView()          // 绘制层窗口已在 show() 时创建,这里仅兜底
             boundsView?.setSnapshots(list)
@@ -439,17 +430,22 @@ class OverlayDebugWindow(private val service: AccessibilityService) {
             setLayerVisible(cardLp, cardView, false)      // 信息卡片保持隐藏
             selectedIndex = 0           // 根节点仅在内部选中,不弹卡片
 
-            // 后台查询(反射 binder 调用不能在主线程),完成后主线程替换标题;
-            // 两次短重试:切换瞬间系统侧任务栈可能尚未就绪,getTasks 返回旧值/null
+            // 后台轮询(GKD resolveActivityId):反射 getTasks 查询,
+            // 直到返回的包名等于本次抓取的 appId(未对齐说明任务栈未就绪,继续等),上限 2 秒
             val generation = captureGeneration
             Thread {
                 var top: android.content.ComponentName? = null
-                repeat(2) {
+                var waited = 0L
+                while (waited < 2000) {
+                    // 反射 getTasks 以应用身份可能看不到前台任务,退回事件缓存的同包名 Activity
                     top = runCatching { queryTopActivityViaReflection() }.getOrNull()
-                    if (top != null) return@repeat
-                    Thread.sleep(150)
+                        ?: (service as? com.yzjdev.autotask.automation.DramaAccessibilityService)
+                            ?.getValidActivity(appId)
+                    if (top != null && top.packageName == appId) break
+                    Thread.sleep(100)
+                    waited += 100
                 }
-                val result = top ?: return@Thread
+                val result = top?.takeIf { it.packageName == appId } ?: return@Thread
                 mainHandler.post {
                     // 只替换本次抓取的标题;期间用户重新抓取过(generation 变化)则丢弃
                     if (generation == captureGeneration && captureEnabled) {
@@ -497,62 +493,6 @@ class OverlayDebugWindow(private val service: AccessibilityService) {
         val tasks = getTasks.invoke(taskManager, 1) as? List<*>
         return (tasks?.firstOrNull() as? android.app.ActivityManager.RunningTaskInfo)
             ?.topActivity
-    }
-
-    /** 深度优先快照,收集边界/摘要/父子关系(忽略状态栏区域) */
-    private fun traverseSnapshot(
-        node: AccessibilityNodeInfo,
-        parent: Int,
-        out: MutableList<NodeSnapshot>,
-    ): Int {
-        if (out.size >= MAX_NODES) return -1
-        // 整体位于状态栏内的节点不收录(不绘制、不可命中)
-        val bounds = Rect()
-        node.getBoundsInScreen(bounds)
-        if (bounds.bottom <= statusBarHeight()) return -1
-        // 不可见节点及其子树不收录(不绘制、不可命中)
-        if (!node.isVisibleToUser) return -1
-        val index = out.size
-        out.add(snapshotOf(node))
-        val children = ArrayList<Int>()
-        for (i in 0 until node.childCount) {
-            val child = node.getChild(i) ?: continue
-            val ci = traverseSnapshot(child, index, out)
-            if (ci >= 0) children.add(ci)
-        }
-        // 回填父子关系(snapshotOf 不感知树结构,parent/children 在此统一填入)
-        val s = out[index]
-        out[index] = NodeSnapshot(s.rect, s.clickable, s.info, s.table, parent, children)
-        return index
-    }
-
-    private fun snapshotOf(node: AccessibilityNodeInfo): NodeSnapshot {
-        val r = Rect()
-        node.getBoundsInScreen(r)
-        val text = node.text?.toString()?.takeIf { it.isNotBlank() }
-        val desc = node.contentDescription?.toString()
-        val cls = node.className?.toString()?.substringAfterLast('.') ?: "?"
-        val id = node.viewIdResourceName?.substringAfter('/')?.let { "#$it" } ?: ""
-        val summary = buildString {
-            append(cls)
-            append(id)
-            if (!text.isNullOrBlank()) append(" \"$text\"")
-            if (!desc.isNullOrBlank()) append(" desc:\"$desc\"")
-            if (node.isClickable) append(" [可点击]")
-        }
-        // 表格数据:属性名 → 值
-        val table = linkedMapOf(
-            "类名" to (node.className?.toString() ?: "?"),
-            "viewId" to (node.viewIdResourceName ?: "无"),
-            "文本" to (text ?: "无"),
-            "描述" to (desc ?: "无"),
-            "边界" to "${r.width()}x${r.height()} @(${r.left},${r.top})",
-            "可点击" to if (node.isClickable) "是" else "否",
-            "可滚动" to if (node.isScrollable) "是" else "否",
-            "可勾选" to if (node.isCheckable) "是" else "否",
-            "子节点" to node.childCount.toString(),
-        )
-        return NodeSnapshot(r, node.isClickable, summary, table, -1, emptyList())
     }
 
     /**
@@ -1125,12 +1065,6 @@ class OverlayDebugWindow(private val service: AccessibilityService) {
             layoutParams = FrameLayout.LayoutParams(dp(36), dp(36), Gravity.CENTER)
             setOnClickListener { onClick() }
         }
-
-    /** 状态栏高度(节点边界为屏幕坐标,以此过滤状态栏区域) */
-    private fun statusBarHeight(): Int {
-        val id = service.resources.getIdentifier("status_bar_height", "dimen", "android")
-        return if (id > 0) service.resources.getDimensionPixelSize(id) else dp(24)
-    }
 
     private fun dp(v: Int): Int = TypedValue.applyDimension(
         TypedValue.COMPLEX_UNIT_DIP, v.toFloat(), service.resources.displayMetrics
