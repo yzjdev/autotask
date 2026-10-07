@@ -156,6 +156,10 @@ class TaskRunner(private val service: DramaAccessibilityService) {
         }
     }
 
+    /** 规则是否在途:同 key 未执行完前不再重复触发(双事件/去抖重评都会走到这里) */
+    private fun inFlight(task: GkdTask, rule: GkdTask.Rule): Boolean =
+        jobs["${task.id}|${rule.key}"]?.isActive == true
+
     /** Activity 刷新(resetMatch=activity 的重置时机):记录当前 activity 供比对 */
     private fun activityMatch(ids: List<String>, activity: String): Boolean =
         ids.isEmpty() || ids.any { activity == it || activity.startsWith(it) }
@@ -422,7 +426,14 @@ class TaskRunner(private val service: DramaAccessibilityService) {
     /** 启动单条规则执行;actionDelay 二次确认后执行 */
     private fun launchRule(task: GkdTask, rule: GkdTask.Rule, s: ExecState, now: Long, eventType: String) {
         val stateKey = "${task.id}|${rule.key}"
-        LogStore.log("▶ ${appName(task.packageName)} 「${task.name}」${rule.summary} · $eventType")
+        // 在途防重:同规则未执行完前不重复触发/记日志(状态+内容双事件、去抖重评的并发来源)
+        if (inFlight(task, rule)) return
+        // 动作目标:matches 最后一条的查找结果(从右往左);反向触发规则允许无目标
+        val action = rule.action ?: Action.Click
+        val target = findTarget(rule)
+        if (target == null && !rule.triggerOnAbsent && action in NODE_ACTIONS) return
+        val what = nodeInfo(target)
+        LogStore.log("▶ ${appName(task.packageName)} 「${task.name}」${rule.summary}$what · $eventType")
         val job = scope.launch {
             val self = coroutineContext[Job]!!
             try {
@@ -434,7 +445,7 @@ class TaskRunner(private val service: DramaAccessibilityService) {
                         return@launch
                     }
                 }
-                executeRule(task, rule)
+                executeRule(task, rule, target)
                 s.count++
                 s.lastAt = System.currentTimeMillis()
                 if (priorityActive(task, rule, s, System.currentTimeMillis())) {
@@ -455,11 +466,10 @@ class TaskRunner(private val service: DramaAccessibilityService) {
      *  - position:相对节点边界的偏移(正 = 左/上,负 = 右/下)
      *  - swipeArg:绝对坐标滑动;方向编码 endY=-1 上滑 / -2 下滑
      */
-    private suspend fun executeRule(task: GkdTask, rule: GkdTask.Rule) {
+    private suspend fun executeRule(task: GkdTask, rule: GkdTask.Rule, found: AccessibilityNodeInfo?) {
         val action = rule.action ?: Action.Click
-        // 动作目标:matches 最后一条的查找结果(从右往左);position 存在时默认 clickCenter
-        // 反向触发规则按定义无目标节点:target 为 null,仅执行 Back/Swipe/坐标类动作
-        val target = findTarget(rule) ?: if (rule.triggerOnAbsent) null else return
+        // 目标由 launchRule 预查传入;actionDelay 二次确认后需重查,故此处仍按需查找
+        val target = found ?: if (rule.triggerOnAbsent) null else findTarget(rule) ?: return
         if (target == null && action in listOf(
                 Action.ClickNode, Action.LongClickNode, Action.InputText, Action.Check, Action.Uncheck,
             )
@@ -575,8 +585,27 @@ class TaskRunner(private val service: DramaAccessibilityService) {
         }.getOrDefault(pkg)
     }
 
+    /** 命中节点详细信息:类名/文本/desc/id/边界,供触发日志 */
+    private fun nodeInfo(n: AccessibilityNodeInfo?): String {
+        n ?: return ""
+        val parts = ArrayList<String>()
+        n.className?.toString()?.substringAfterLast('.')?.takeIf { it.isNotBlank() }?.let { parts.add(it) }
+        n.text?.toString()?.takeIf { it.isNotBlank() }?.let { parts.add("text=${it.take(30)}") }
+        n.contentDescription?.toString()?.takeIf { it.isNotBlank() }?.let { parts.add("desc=${it.take(30)}") }
+        n.viewIdResourceName?.takeIf { it.isNotBlank() }?.let { parts.add("id=${it.substringAfterLast('/')}") }
+        if (parts.isEmpty()) return ""
+        val r = android.graphics.Rect()
+        n.getBoundsInScreen(r)
+        if (!r.isEmpty) parts.add("bounds=(${r.left},${r.top},${r.width()}x${r.height()})")
+        return " 「${parts.joinToString(" ")}」"
+    }
+
     private companion object {
         const val ACTION_CLICK = AccessibilityNodeInfo.ACTION_CLICK
         const val ACTION_LONG_CLICK = AccessibilityNodeInfo.ACTION_LONG_CLICK
+        /** 需要目标节点的动作(无目标时放弃触发) */
+        val NODE_ACTIONS = listOf(
+            Action.ClickNode, Action.LongClickNode, Action.InputText, Action.Check, Action.Uncheck,
+        )
     }
 }
