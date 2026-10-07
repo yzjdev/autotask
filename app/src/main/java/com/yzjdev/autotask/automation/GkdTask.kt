@@ -166,7 +166,25 @@ data class GkdTask(
         val matchSystemApp: Boolean? = null,
         val matchLauncher: Boolean? = null,
         val globalApps: List<GlobalApp>? = null,
-    )
+    ) {
+        /** 单条规则摘要:动作名 + 首个触发文本(日志用) */
+        val summary: String by lazy {
+            val text = (matches.lastOrNull() ?: anyMatches.firstOrNull())
+                ?.firstPropValue("text", "desc")
+            val act = when (action) {
+                Action.Click, Action.ClickNode, Action.ClickCenter, null -> "点击"
+                Action.LongClick, Action.LongClickNode, Action.LongClickCenter -> "长按"
+                Action.Back -> "返回"
+                Action.Swipe -> "滑动"
+                Action.InputText -> "输入"
+                Action.LaunchApp -> "启动"
+                Action.Check -> "勾选"
+                Action.Uncheck -> "取消勾选"
+                Action.None -> "标记"
+            }
+            if (text != null) "$act「$text」" else act
+        }
+    }
 
     /**
      * 自定义位置(RawSubscription.Position):字段为表达式字符串,
