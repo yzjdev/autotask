@@ -167,11 +167,9 @@ data class GkdTask(
         val matchLauncher: Boolean? = null,
         val globalApps: List<GlobalApp>? = null,
     ) {
-        /** 单条规则摘要:动作名 + 首个触发文本(日志用) */
+        /** 单条规则摘要:动作名(日志用) */
         val summary: String by lazy {
-            val text = (matches.lastOrNull() ?: anyMatches.firstOrNull())
-                ?.firstPropValue("text", "desc")
-            val act = when (action) {
+            when (action) {
                 Action.Click, Action.ClickNode, Action.ClickCenter, null -> "点击"
                 Action.LongClick, Action.LongClickNode, Action.LongClickCenter -> "长按"
                 Action.Back -> "返回"
@@ -182,7 +180,6 @@ data class GkdTask(
                 Action.Uncheck -> "取消勾选"
                 Action.None -> "标记"
             }
-            if (text != null) "$act「$text」" else act
         }
     }
 

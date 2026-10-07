@@ -42,10 +42,11 @@ data class GkdSelector(val expr: String = "") {
         return program.matches(node)
     }
 
-    /** 取第一个带引号的文本断言值(text/desc),供日志摘要显示 */
-    fun firstPropValue(vararg keys: String): String? {
-        // 匹配 [key op "value"](引号可为 '/"/`),值后跟 ] 或空格(|| 组合断言),返回引号内值;
-        // text=null 等裸值不匹配,避免跨断言错误捕获
+    /** 取整个表达式内第一个带引号 text/desc 值 */
+    fun firstPropValue(vararg keys: String): String? = firstPropIn(expr, keys)
+
+    /** 在指定表达式范围内取第一个带引号 text/desc 值;裸值(text=null)不匹配,值后须跟 ] 或空格(|| 组合) */
+    private fun firstPropIn(expr: String, keys: Array<out String>): String? {
         val pattern = """\[(?:text|desc|${keys.joinToString("|") { Regex.escape(it) }})\s*(?:=|\*=|\^=|\$=|~=)\s*(['"`])((?:(?!\1).)*)\1(?:\]|\s)"""
         return Regex(pattern).find(expr)?.groupValues?.get(2)
     }

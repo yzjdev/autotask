@@ -92,7 +92,7 @@ import androidx.compose.material.icons.filled.Add
 import androidx.compose.material.icons.filled.Tune
 import androidx.compose.material.icons.automirrored.filled.ListAlt
 import androidx.compose.material.icons.filled.PlayCircle
-import androidx.compose.material.icons.filled.PlaylistAddCheck
+import androidx.compose.material.icons.automirrored.filled.PlaylistAddCheck
 import androidx.compose.material.icons.filled.ExpandMore
 import androidx.compose.material.icons.filled.TouchApp
 import androidx.compose.material.icons.filled.CheckCircle
@@ -4142,7 +4142,7 @@ private fun RuleEditorPage(
                     .height(48.dp),
                 contentPadding = PaddingValues(horizontal = 24.dp),
             ) {
-                Icon(Icons.Filled.PlaylistAddCheck, contentDescription = null, modifier = Modifier.size(18.dp))
+                Icon(Icons.AutoMirrored.Filled.PlaylistAddCheck, contentDescription = null, modifier = Modifier.size(18.dp))
                 Spacer(Modifier.width(6.dp))
                 Text("保存")
             }

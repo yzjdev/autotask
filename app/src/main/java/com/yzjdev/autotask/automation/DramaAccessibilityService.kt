@@ -168,9 +168,6 @@ open class DramaAccessibilityService : AccessibilityService() {
         }
     }
 
-    /** 当前是否已连接 */
-    fun isConnected(): Boolean = true
-
     // ---- 事件 ----
 
     override fun onAccessibilityEvent(event: AccessibilityEvent?) {
@@ -314,19 +311,8 @@ open class DramaAccessibilityService : AccessibilityService() {
     }
 
     /** 按文本精确查找节点 */
-    fun findNodeByText(text: String): AccessibilityNodeInfo? = findNodeByText { it == text }
-
-    /** 按文本查找节点(自定义匹配) */
-    fun findNodeByText(matcher: (String) -> Boolean): AccessibilityNodeInfo? =
-        findFirst { readableText(it)?.let(matcher) == true }
-
-    /** 按 resourceId 查找节点 */
-    fun findNodeByResourceId(resourceId: String): AccessibilityNodeInfo? =
-        findFirst { it.viewIdResourceName == resourceId }
-
-    /** 按 className 查找节点 */
-    fun findNodeByClassName(className: String): AccessibilityNodeInfo? =
-        findFirst { it.className.toString() == className }
+    fun findNodeByText(text: String): AccessibilityNodeInfo? =
+        findFirst { readableText(it) == text }
 
     // ---- 查找基础方法 ----
 
@@ -341,39 +327,6 @@ open class DramaAccessibilityService : AccessibilityService() {
         }
         return result
     }
-
-    /** 基础查找:遍历节点树,收集所有满足条件的节点 */
-    fun findAll(predicate: (AccessibilityNodeInfo) -> Boolean): List<AccessibilityNodeInfo> {
-        val result = ArrayList<AccessibilityNodeInfo>()
-        traverseNodes { node, _ ->
-            if (predicate(node)) result += node
-            false
-        }
-        return result
-    }
-
-    /** 通用查找节点:条件全部满足即返回第一个匹配节点 */
-    fun findNode(
-        text: String? = null,
-        textContains: String? = null,
-        resourceId: String? = null,
-        className: String? = null,
-        contentDesc: String? = null,
-        clickable: Boolean? = null,
-        extra: ((AccessibilityNodeInfo) -> Boolean)? = null,
-    ): AccessibilityNodeInfo? = findFirst { node ->
-        (text == null || readableText(node) == text) &&
-            (textContains == null || readableText(node)?.contains(textContains) == true) &&
-            (resourceId == null || node.viewIdResourceName == resourceId) &&
-            (className == null || node.className.toString() == className) &&
-            (contentDesc == null || node.contentDescription?.toString() == contentDesc) &&
-            (clickable == null || node.isClickable == clickable) &&
-            (extra == null || extra(node))
-    }
-
-    /** 收集所有可点击节点(定位按钮列表) */
-    fun findAllClickableNodes(): List<AccessibilityNodeInfo> =
-        findAll { it.isClickable }
 
     /** 读取节点可读文本(优先 contentDescription,其次 text) */
     fun readableText(node: AccessibilityNodeInfo): String? =
