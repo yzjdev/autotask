@@ -88,7 +88,7 @@ class TaskRunner(private val service: DramaAccessibilityService) {
                         val s = state(task, rule)
                         if (!schedulable(task, rule, s, now)) continue
                         if (!preKeysOk(task, rule, s, now)) continue
-                        if (ruleMatches(root, rule)) launchRule(task, rule, s, now)
+                        if (ruleMatches(root, rule)) launchRule(task, rule, s, now, "forcedTime")
                     }
                 }
             }
@@ -150,7 +150,7 @@ class TaskRunner(private val service: DramaAccessibilityService) {
                 .sortedWith(compareBy({ (r, s) -> if (priorityActive(task, r, s, now)) 0 else 1 }, { (r, _) -> groupOr(task.order, r.order) }))
             for ((rule, state) in ranked) {
                 if (preKeysOk(task, rule, state, now) && ruleMatches(root, rule)) {
-                    launchRule(task, rule, state, now)
+                    launchRule(task, rule, state, now, eventType)
                 }
             }
         }
@@ -377,6 +377,7 @@ class TaskRunner(private val service: DramaAccessibilityService) {
                     else AccessibilityNodeInfo.ACTION_CLEAR_SELECTION,
                 )
             }
+            Action.LaunchApp, Action.None -> {}
         }
     }
 
@@ -419,9 +420,9 @@ class TaskRunner(private val service: DramaAccessibilityService) {
     }
 
     /** 启动单条规则执行;actionDelay 二次确认后执行 */
-    private fun launchRule(task: GkdTask, rule: GkdTask.Rule, s: ExecState, now: Long) {
+    private fun launchRule(task: GkdTask, rule: GkdTask.Rule, s: ExecState, now: Long, eventType: String) {
         val stateKey = "${task.id}|${rule.key}"
-        LogStore.log("▶ ${appName(task.packageName)} 「${task.name}」${rule.summary}")
+        LogStore.log("▶ ${appName(task.packageName)} 「${task.name}」${rule.summary} · $eventType")
         val job = scope.launch {
             val self = coroutineContext[Job]!!
             try {
@@ -513,6 +514,7 @@ class TaskRunner(private val service: DramaAccessibilityService) {
                     else AccessibilityNodeInfo.ACTION_CLEAR_SELECTION,
                 )
             }
+            Action.LaunchApp, Action.None -> {}
         }
     }
 
