@@ -42,11 +42,12 @@ data class GkdSelector(val expr: String = "") {
         return program.matches(node)
     }
 
-    /** 取第一个简单文本断言值(列表摘要展示) */
+    /** 取第一个带引号的文本断言值(text/desc),供日志摘要显示 */
     fun firstPropValue(vararg keys: String): String? {
-        val pattern = """\[("?)(""" + keys.joinToString("|") { Regex.escape(it) } +
-            """)\s*(?:=|\*=|\^=|\$=|~=)\s*(["'`])(.*?)\3\]"""
-        return Regex(pattern).find(expr)?.groupValues?.get(3)
+        // 匹配 [key op "value"](引号可为 '/"/`),值后跟 ] 或空格(|| 组合断言),返回引号内值;
+        // text=null 等裸值不匹配,避免跨断言错误捕获
+        val pattern = """\[(?:text|desc|${keys.joinToString("|") { Regex.escape(it) }})\s*(?:=|\*=|\^=|\$=|~=)\s*(['"`])((?:(?!\1).)*)\1(?:\]|\s)"""
+        return Regex(pattern).find(expr)?.groupValues?.get(2)
     }
 
     companion object {
