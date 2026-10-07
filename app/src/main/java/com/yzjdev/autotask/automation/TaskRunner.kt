@@ -347,7 +347,7 @@ class TaskRunner(private val service: DramaAccessibilityService) {
                     action == Action.ClickNode -> ok = target?.performAction(AccessibilityNodeInfo.ACTION_CLICK) == true
                     else -> { ok = target?.performAction(ACTION_CLICK) == true; if (!ok) clickAtRect(step.position, r); ok = true }
                 }
-                LogStore.log("  ↳ $label ${if (ok) "点击" else "点击失败"}$what")
+                if (!ok) LogStore.log("  ↳ $label 点击失败$what")
             }
             Action.LongClick, Action.LongClickNode, Action.LongClickCenter -> {
                 var ok: Boolean
@@ -356,11 +356,10 @@ class TaskRunner(private val service: DramaAccessibilityService) {
                     action == Action.LongClickNode -> ok = target?.performAction(ACTION_LONG_CLICK) == true
                     else -> { ok = target?.performAction(ACTION_LONG_CLICK) == true; if (!ok) longClickAtRect(step.position, r); ok = true }
                 }
-                LogStore.log("  ↳ $label ${if (ok) "长按" else "长按失败"}$what")
+                if (!ok) LogStore.log("  ↳ $label 长按失败$what")
             }
             Action.Back -> {
                 service.goBack()
-                LogStore.log("  ↳ $label 返回键")
             }
             Action.Swipe -> {
                 val arg = step.swipeArg
@@ -374,11 +373,9 @@ class TaskRunner(private val service: DramaAccessibilityService) {
                     }
                     else -> service.swipeUp()
                 }
-                LogStore.log("  ↳ $label 滑动")
             }
             Action.InputText -> {
                 target?.performAction(AccessibilityNodeInfo.ACTION_FOCUS)
-                LogStore.log("  ↳ $label 输入文本(聚焦)$what")
             }
             Action.LaunchApp -> LogStore.log("  ↳ $label 启动应用(待实现)")
             Action.Check, Action.Uncheck -> {
@@ -386,7 +383,7 @@ class TaskRunner(private val service: DramaAccessibilityService) {
                     if (action == Action.Check) AccessibilityNodeInfo.ACTION_SELECT
                     else AccessibilityNodeInfo.ACTION_CLEAR_SELECTION,
                 ) == true
-                LogStore.log("  ↳ $label ${if (action == Action.Check) "勾选" else "取消勾选"}${if (ok) "" else "失败"}$what")
+                if (!ok) LogStore.log("  ↳ $label ${if (action == Action.Check) "勾选" else "取消勾选"}失败$what")
             }
             Action.None -> LogStore.log("  ↳ $label 匹配标记$what")
         }
@@ -495,7 +492,7 @@ class TaskRunner(private val service: DramaAccessibilityService) {
                     action == Action.ClickNode -> ok = target?.performAction(AccessibilityNodeInfo.ACTION_CLICK) == true
                     else -> { ok = target?.performAction(ACTION_CLICK) == true; if (!ok) clickAtWithPosition(rule, r); ok = true }
                 }
-                LogStore.log("  ↳ ${label.ifEmpty { rule.summary }} ${if (ok) "点击" else "点击失败"}$what")
+                if (!ok) LogStore.log("  ↳ ${label.ifEmpty { rule.summary }} 点击失败$what")
             }
             Action.LongClick, Action.LongClickNode, Action.LongClickCenter -> {
                 var ok: Boolean
@@ -504,11 +501,10 @@ class TaskRunner(private val service: DramaAccessibilityService) {
                     action == Action.LongClickNode -> ok = target?.performAction(ACTION_LONG_CLICK) == true
                     else -> { ok = target?.performAction(ACTION_LONG_CLICK) == true; if (!ok) longClickAtWithPosition(rule, r); ok = true }
                 }
-                LogStore.log("  ↳ ${label.ifEmpty { rule.summary }} ${if (ok) "长按" else "长按失败"}$what")
+                if (!ok) LogStore.log("  ↳ ${label.ifEmpty { rule.summary }} 长按失败$what")
             }
             Action.Back -> {
                 service.goBack()
-                LogStore.log("  ↳ ${label.ifEmpty { rule.summary }} 返回键")
             }
             Action.Swipe -> {
                 // 照抄 GkdAction.Swipe:swipeArg.start 必填,end 缺省 = start;无参数回退上下滑
@@ -527,11 +523,9 @@ class TaskRunner(private val service: DramaAccessibilityService) {
                     rule.swipeDir == 1 -> service.swipeUp()
                     else -> service.swipeUp()
                 }
-                LogStore.log("  ↳ ${label.ifEmpty { rule.summary }} 滑动")
             }
             Action.InputText -> {
                 target?.performAction(AccessibilityNodeInfo.ACTION_FOCUS)
-                LogStore.log("  ↳ ${label.ifEmpty { rule.summary }} 输入文本(聚焦)$what")
             }
             Action.LaunchApp -> LogStore.log("  ↳ ${label.ifEmpty { rule.summary }} 启动应用(待实现)")
             Action.Check, Action.Uncheck -> {
@@ -539,7 +533,7 @@ class TaskRunner(private val service: DramaAccessibilityService) {
                     if (action == Action.Check) AccessibilityNodeInfo.ACTION_SELECT
                     else AccessibilityNodeInfo.ACTION_CLEAR_SELECTION,
                 ) == true
-                LogStore.log("  ↳ ${label.ifEmpty { rule.summary }} ${if (action == Action.Check) "勾选" else "取消勾选"}${if (ok) "" else "失败"}$what")
+                if (!ok) LogStore.log("  ↳ ${label.ifEmpty { rule.summary }} ${if (action == Action.Check) "勾选" else "取消勾选"}失败$what")
             }
             Action.None -> LogStore.log("  ↳ ${label.ifEmpty { rule.summary }} 匹配标记$what")
         }
