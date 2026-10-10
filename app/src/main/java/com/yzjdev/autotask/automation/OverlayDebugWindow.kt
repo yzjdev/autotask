@@ -35,6 +35,7 @@ class OverlayDebugWindow(private val service: AccessibilityService) {
 
     companion object {
         private const val MAX_INFO_LINES = 24   // 信息卡片最多行数
+        private const val CARD_DRAG_SLOP_PX = 12  // 卡片拖动 vs 点击的位移阈值
     }
 
     // 服务构造时 context 尚未 attach,所有 WindowManager/Resources 相关一律懒初始化
@@ -114,14 +115,18 @@ class OverlayDebugWindow(private val service: AccessibilityService) {
     @Volatile
     private var capturePkg: String? = null
 
+    /** 绘制层是否由窗口列表点选触发:窗口列表恢复时自动关闭(调试抓取自身开启时不介入) */
+    private var boundsFromWindowList = false
+
     /**
-     * 订阅服务层的 lastActivity:每次前台 Activity 切换(经 getActivityInfo 反查确认)
-     * 即同步更新悬浮窗标题,无需用户重新抓取节点。
+     * 跟随前台窗口变化:每次窗口切换都从「焦点激活窗口」重新解析 Activity(服务侧 currentActivity),
+     * 无需用户重新抓取节点。只跟随与当前抓取窗口同包名的结果;桌面/Launcher 是合法 Activity,
+     * 但若当前抓的不是桌面,不能让标题跳回桌面。
      */
-    private val activityListener: (android.content.ComponentName) -> Unit = { cn ->
+    private val windowListener: () -> Unit = {
         mainHandler.post {
-            // 只跟随与当前抓取窗口同包名的 Activity;桌面/Launcher 是合法 Activity,
-            // 但若当前抓的不是桌面,不能让标题跳回桌面
+            val cn = (service as? com.yzjdev.autotask.automation.DramaAccessibilityService)
+                ?.currentActivity() ?: return@post
             if (capturePkg == null || cn.packageName == capturePkg) applyHeader(cn)
         }
     }
@@ -152,18 +157,20 @@ class OverlayDebugWindow(private val service: AccessibilityService) {
             boundsView?.visibility = View.GONE
             ensureInfoCard(lastAppName)
             cardView?.visibility = View.GONE
-            // 订阅前台 Activity 切换,标题实时跟随(悬浮窗显示期间)
+            // 订阅前台窗口切换,标题实时跟随(悬浮窗显示期间)
             (service as? com.yzjdev.autotask.automation.DramaAccessibilityService)
-                ?.addActivityListener(activityListener)
+                ?.addWindowListener(windowListener)
             // 悬浮球最后创建,天然位于最上层
             toggleWindow.show()
+            DramaAccessibilityService.notifyOverlayShowing(true)
         }
     }
 
     fun hide() {
         mainHandler.post {
             (service as? com.yzjdev.autotask.automation.DramaAccessibilityService)
-                ?.removeActivityListener(activityListener)
+                ?.removeWindowListener(windowListener)
+            DramaAccessibilityService.notifyOverlayShowing(false)
             removeCaptureViews()
             toggleWindow.hide()
             captureEnabled = false
@@ -173,6 +180,35 @@ class OverlayDebugWindow(private val service: AccessibilityService) {
 
     val isShowing: Boolean
         get() = toggleWindow.isShowing
+
+    // ---- 窗口列表点选:只画指定窗口的节点边界 ----
+
+    /**
+     * 窗口列表点选某窗口:只绘制该窗口的节点边界(不显示悬浮球与信息卡片)。
+     * 需在主线程调用;返回 false 表示该窗口已失效、取不到节点。
+     */
+    fun showBoundsFor(window: android.view.accessibility.AccessibilityWindowInfo): Boolean {
+        val list = NodeSnapshotCollector.collect(service, window)
+        if (list.isEmpty()) return false
+        snapshots = list
+        selectedIndex = -1
+        boundsFromWindowList = true
+        val pkg = runCatching { window.root?.packageName?.toString() }.getOrNull().orEmpty()
+        lastAppName = if (pkg.isEmpty()) "窗口 ${window.id}" else appLabel(pkg)
+        ensureBoundsView()
+        boundsView?.setSnapshots(list)                  // 内含清空上次命中的高亮
+        setLayerVisible(boundsLp, boundsView, true)
+        setLayerVisible(cardLp, cardView, false)
+        hideTreeDrawer()
+        return true
+    }
+
+    /** 关闭窗口列表触发的绘制层(连同信息卡片与节点树);调试抓取自身开启时不介入 */
+    fun hideBounds() {
+        if (!boundsFromWindowList) return
+        boundsFromWindowList = false
+        hideCaptureLayers()
+    }
 
     // ---- 抓取 ----
 
@@ -185,6 +221,7 @@ class OverlayDebugWindow(private val service: AccessibilityService) {
         captureEnabled = !captureEnabled
         toggleWindow.setActive(captureEnabled)
         if (captureEnabled) {
+            boundsFromWindowList = false   // 调试抓取接管绘制层
             captureAndShow()
         } else {
             hideCaptureLayers()
@@ -196,6 +233,8 @@ class OverlayDebugWindow(private val service: AccessibilityService) {
         setLayerVisible(cardLp, cardView, false)
         setLayerVisible(boundsLp, boundsView, false)
         hideTreeDrawer()
+        // 关闭绘制层:清空上次命中的高亮,下次抓取从干净状态开始
+        boundsView?.setSelected(-1)
         snapshots = emptyList()
         selectedIndex = -1
     }
@@ -416,11 +455,10 @@ class OverlayDebugWindow(private val service: AccessibilityService) {
             }
             val appId = root.packageName?.toString() ?: "Unknown"
             // GKD resolveActivityId 语义:appId 以无障碍根节点包名为准,
-            // 标题先显示,后台轮询到「系统侧前台包名 == 根节点包名」才更新 Activity 名
-            captureGeneration++
+            // 标题的 Activity 只认「焦点激活窗口」的解析结果(同包名才采用),不用缓存或反射来源
             capturePkg = appId
             val svc = service as? com.yzjdev.autotask.automation.DramaAccessibilityService
-            val title = svc?.getValidActivity(appId)?.let { formatTitle(it) }
+            val title = svc?.currentActivity()?.takeIf { it.packageName == appId }?.let { formatTitle(it) }
                 ?: "$appId(未知 Activity)"
             lastAppName = title
             snapshots = list
@@ -429,70 +467,9 @@ class OverlayDebugWindow(private val service: AccessibilityService) {
             setLayerVisible(boundsLp, boundsView, true)   // 显示绘制层
             setLayerVisible(cardLp, cardView, false)      // 信息卡片保持隐藏
             selectedIndex = 0           // 根节点仅在内部选中,不弹卡片
-
-            // 后台轮询(GKD resolveActivityId):反射 getTasks 查询,
-            // 直到返回的包名等于本次抓取的 appId(未对齐说明任务栈未就绪,继续等),上限 2 秒
-            val generation = captureGeneration
-            Thread {
-                var top: android.content.ComponentName? = null
-                var waited = 0L
-                while (waited < 2000) {
-                    // 反射 getTasks 以应用身份可能看不到前台任务,退回事件缓存的同包名 Activity
-                    top = runCatching { queryTopActivityViaReflection() }.getOrNull()
-                        ?: (service as? com.yzjdev.autotask.automation.DramaAccessibilityService)
-                            ?.getValidActivity(appId)
-                    if (top != null && top.packageName == appId) break
-                    Thread.sleep(100)
-                    waited += 100
-                }
-                val result = top?.takeIf { it.packageName == appId } ?: return@Thread
-                mainHandler.post {
-                    // 只替换本次抓取的标题;期间用户重新抓取过(generation 变化)则丢弃
-                    if (generation == captureGeneration && captureEnabled) {
-                        applyHeader(result)
-                    }
-                }
-            }.start()
         } catch (_: Exception) {
             // 窗口可能已被系统回收,静默忽略
         }
-    }
-
-    /** 抓取代数:每次 captureAndShow 递增,用于丢弃过期的后台查询结果 */
-    @Volatile
-    private var captureGeneration = 0
-
-    /** 已应用的 hidden API 豁免("L" 前缀覆盖全部类),进程级一次即可 */
-    private val hiddenApiReady: Boolean by lazy {
-        runCatching {
-            org.lsposed.hiddenapibypass.HiddenApiBypass.setHiddenApiExemptions("L")
-        }.isSuccess
-    }
-
-    /**
-     * 反射系统 ActivityTaskManager binder 获取前台 Activity,不依赖无障碍事件与 Shizuku。
-     * 链路:ServiceManager.getService("activity_task") → IActivityTaskManager.Stub.asInterface
-     * → getTasks(1) → RunningTaskInfo.topActivity。
-     * 先用 HiddenApiBypass 豁免 hidden API 限制(logcat 显示 asInterface 被 blocked);
-     * 需在非主线程调用(binder 调用);任何 ROM 差异/受限场景返回 null,由调用方兜底。
-     */
-    private fun queryTopActivityViaReflection(): android.content.ComponentName? {
-        if (!hiddenApiReady) return null
-        val serviceManager = Class.forName("android.os.ServiceManager")
-        val getService = serviceManager.getMethod("getService", String::class.java)
-        val binder = getService.invoke(null, "activity_task") ?: return null
-
-        val stubClass = Class.forName("android.app.IActivityTaskManager\$Stub")
-        val asInterface = stubClass.getMethod("asInterface", android.os.IBinder::class.java)
-        val taskManager = asInterface.invoke(null, binder)
-
-        val getTasks = taskManager.javaClass.methods.firstOrNull {
-            it.name == "getTasks" && it.parameterTypes.size == 1
-        } ?: return null
-        @Suppress("UNCHECKED_CAST")
-        val tasks = getTasks.invoke(taskManager, 1) as? List<*>
-        return (tasks?.firstOrNull() as? android.app.ActivityManager.RunningTaskInfo)
-            ?.topActivity
     }
 
     /**
@@ -669,9 +646,51 @@ class OverlayDebugWindow(private val service: AccessibilityService) {
             addView(treeHandle)
         }
         cardView = card
+        attachCardDrag(card)
         wm.addView(card, cardLp)
         // 悬浮球永远置顶:信息卡片创建后把悬浮球重新加回最上层
         toggleWindow.bringToFront()
+    }
+
+    /**
+     * 信息卡片整卡拖动:监听器挂在卡片根布局上。
+     * 子 View(关闭钮、方向键、节点树把手、表格滚动区)会消费自己的 DOWN,
+     * 事件不会冒泡到这里,因此拖动只在标题栏/分隔线/空白处生效,不干扰内部交互。
+     */
+    @SuppressLint("ClickableViewAccessibility")
+    private fun attachCardDrag(card: LinearLayout) {
+        var downX = 0f; var downY = 0f
+        var startX = 0; var startY = 0
+        var dragging = false
+        card.setOnTouchListener { v, e ->
+            when (e.actionMasked) {
+                MotionEvent.ACTION_DOWN -> {
+                    downX = e.rawX; downY = e.rawY
+                    startX = cardLp.x; startY = cardLp.y
+                    dragging = false
+                    true
+                }
+                MotionEvent.ACTION_MOVE -> {
+                    val dx = e.rawX - downX; val dy = e.rawY - downY
+                    if (dragging || dx * dx + dy * dy > CARD_DRAG_SLOP_PX * CARD_DRAG_SLOP_PX) {
+                        dragging = true
+                        // gravity=CENTER 时 x/y 为相对屏幕中心的偏移,clamp 到半屏范围
+                        cardLp.x = clamp(startX + dx.toInt(),
+                            -(screenW - v.width) / 2, (screenW - v.width) / 2)
+                        cardLp.y = clamp(startY + dy.toInt(),
+                            -(screenH - v.height) / 2, (screenH - v.height) / 2)
+                        wm.updateViewLayout(v, cardLp)
+                    }
+                    true
+                }
+                MotionEvent.ACTION_UP, MotionEvent.ACTION_CANCEL -> {
+                    val wasDragging = dragging
+                    dragging = false
+                    wasDragging
+                }
+                else -> dragging
+            }
+        }
     }
 
     private fun removeCaptureViews() {
@@ -694,6 +713,7 @@ class OverlayDebugWindow(private val service: AccessibilityService) {
         treeListView = null
         treeScroll = null
         treeShown = false
+        boundsFromWindowList = false
         snapshots = emptyList()
         selectedIndex = -1
     }
@@ -862,7 +882,7 @@ class OverlayDebugWindow(private val service: AccessibilityService) {
 
         // ---- 属性表:按 内容/定位/状态/布局 分组,组标题行 + 键值行 ----
         val groups = listOf(
-            "内容" to listOf("类名", "viewId", "文本", "描述"),
+            "内容" to listOf("类名", "viewId", "vid", "文本", "描述"),
             "定位" to listOf("边界"),
             "状态" to listOf("可点击", "可滚动", "可勾选"),
             "布局" to listOf("子节点"),
@@ -970,28 +990,32 @@ class OverlayDebugWindow(private val service: AccessibilityService) {
         private var snapshots: List<NodeSnapshot>? = null
         private var selected = -1
 
+        /** 边框按 dp 加粗:原来写死的 2px 在高密度屏上几乎看不见,但也不宜过粗 */
+        private val density = context.resources.displayMetrics.density
+
         private val normalPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
             style = Paint.Style.STROKE
-            strokeWidth = 2f
-            color = 0x66FF4081.toInt()
+            strokeWidth = 1.2f * density
+            color = 0x99FF4081.toInt()
         }
         private val clickablePaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
             style = Paint.Style.STROKE
-            strokeWidth = 2f
-            color = 0x4400E5FF.toInt()
+            strokeWidth = 1.2f * density
+            color = 0x8800E5FF.toInt()
         }
         private val selectedPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
             style = Paint.Style.STROKE
-            strokeWidth = 5f
+            strokeWidth = 3f * density
             color = 0xFFFFEB3B.toInt()
         }
         private val selectedFill = Paint(Paint.ANTI_ALIAS_FLAG).apply {
             style = Paint.Style.FILL
-            color = 0x33FFEB3B.toInt()
+            color = 0x44FFEB3B.toInt()
         }
 
         fun setSnapshots(list: List<NodeSnapshot>) {
             snapshots = list
+            selected = -1   // 新快照:清空上次命中的高亮,避免旧下标串到新列表
             invalidate()
         }
 
@@ -1001,7 +1025,8 @@ class OverlayDebugWindow(private val service: AccessibilityService) {
         }
 
         /**
-         * 点击命中:选包含触点、面积最小(即树中最深/最内层)的节点。
+         * 点击命中:选包含触点、面积最小的节点(最小命中 = 树中最深/最内层),
+         * 同面积取 DFS 序靠后的(更深的那层)。
          * 返回 true 表示消费了事件。
          */
         override fun onTouchEvent(event: MotionEvent): Boolean {
@@ -1014,12 +1039,11 @@ class OverlayDebugWindow(private val service: AccessibilityService) {
             for ((i, s) in list.withIndex()) {
                 val r = s.rect
                 if (r.width() <= 0 || r.height() <= 0) continue
-                if (r.contains(x, y)) {
-                    val area = r.width() * r.height()
-                    if (area < bestArea) {   // 面积最小 = 树中最深
-                        bestArea = area
-                        best = i
-                    }
+                if (!r.contains(x, y)) continue
+                val area = r.width() * r.height()
+                if (area <= bestArea) {
+                    bestArea = area
+                    best = i
                 }
             }
             if (best >= 0) {

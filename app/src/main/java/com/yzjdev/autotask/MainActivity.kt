@@ -285,16 +285,33 @@ fun AutomationScreen() {
     var overlayOn by remember {
         mutableStateOf(DramaAccessibilityService.isRunning && DramaAccessibilityService.instance?.isDebugOverlayShowing == true)
     }
+    // 窗口列表悬浮窗开关:同样只在服务连接时可开
+    var windowListOn by remember {
+        mutableStateOf(DramaAccessibilityService.isRunning && DramaAccessibilityService.instance?.isWindowListShowing == true)
+    }
     // 服务实例绑定状态:可观察(连接/断开回调驱动),供「待连接」判定与 UI 自动刷新
     var serviceBound by remember { mutableStateOf(DramaAccessibilityService.isRunning) }
     // 订阅无障碍服务连接状态:连接/断开同步绑定状态;服务断开时悬浮窗已被服务 hide(),同步复位开关状态
     DisposableEffect(Unit) {
         val listener = { running: Boolean ->
             serviceBound = running
-            if (!running) overlayOn = false
+            if (!running) {
+                overlayOn = false
+                windowListOn = false
+            }
         }
         DramaAccessibilityService.addStateListener(listener)
-        onDispose { DramaAccessibilityService.removeStateListener(listener) }
+        // 悬浮窗显隐同步:长按悬浮球关闭等非主页入口的变化也驱动开关状态
+        val overlayListener = { showing: Boolean -> overlayOn = showing }
+        DramaAccessibilityService.addOverlayListener(overlayListener)
+        // 窗口列表卡片 ✕ 关闭时同步复位开关
+        val windowListListener = { showing: Boolean -> windowListOn = showing }
+        DramaAccessibilityService.addWindowListListener(windowListListener)
+        onDispose {
+            DramaAccessibilityService.removeStateListener(listener)
+            DramaAccessibilityService.removeOverlayListener(overlayListener)
+            DramaAccessibilityService.removeWindowListListener(windowListListener)
+        }
     }
     // 待连接轮询:设置已开但服务实例未绑定(中间态)时每秒刷新,直至 onServiceConnected 完成
     LaunchedEffect(uiState.isAccessibilityEnabled, serviceBound) {
@@ -610,12 +627,19 @@ fun AutomationScreen() {
                 uiState = uiState,
                 serviceBound = serviceBound,
                 overlayOn = overlayOn,
+                windowListOn = windowListOn,
                 subCount = subCount,
                 onOverlayToggle = {
                     val target = !overlayOn
                     val ok = DramaAccessibilityService.instance
                         ?.showDebugOverlay(target) == true
                     if (ok) overlayOn = target
+                },
+                onWindowListToggle = {
+                    val target = !windowListOn
+                    val ok = DramaAccessibilityService.instance
+                        ?.showWindowListOverlay(target) == true
+                    if (ok) windowListOn = target
                 },
                 onToggleAccessibility = {
                     // 缺「写入安全设置」权限时先走 Shizuku 授权并自动代授,成功后继续开无障碍;
@@ -664,8 +688,10 @@ private fun HomeScreen(
     uiState: AutomationManager.State,
     serviceBound: Boolean,
     overlayOn: Boolean,
+    windowListOn: Boolean,
     subCount: Int?,
     onOverlayToggle: () -> Unit,
+    onWindowListToggle: () -> Unit,
     onToggleAccessibility: () -> Unit,
     modifier: Modifier = Modifier,
 ) {
@@ -705,6 +731,16 @@ private fun HomeScreen(
                 checked = overlayOn,
                 enabled = uiState.isAccessibilityEnabled,
                 onToggle = onOverlayToggle,
+            )
+            TogglePill(
+                modifier = Modifier.fillMaxWidth(),
+                icon = Icons.AutoMirrored.Filled.List,
+                accent = MaterialTheme.colorScheme.secondary,
+                title = "窗口列表",
+                description = "枚举所有窗口,按应用名分组",
+                checked = windowListOn,
+                enabled = uiState.isAccessibilityEnabled,
+                onToggle = onWindowListToggle,
             )
             TogglePill(
                 modifier = Modifier.fillMaxWidth(),
