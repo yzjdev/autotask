@@ -37,6 +37,9 @@ class TaskRunner(private val service: DramaAccessibilityService) {
 
     private val execStates = HashMap<String, ExecState>()
 
+    /** 各规则目标节点当前是否在场(同页面内容变化时检测"从无到有",触发计数重置) */
+    private val targetPresentStates = HashMap<String, Boolean>()
+
     /** GKD updateTopActivity 同 Activity 去抖:≥1s 才再走一次跃迁重置 */
     private var lastResetActivityKey: String? = null
     private var lastResetActivityAt = 0L
@@ -196,6 +199,22 @@ class TaskRunner(private val service: DramaAccessibilityService) {
             if (steps != null && steps.isNotEmpty()) {
                 if (eventType == "windowStateChanged") tryLaunchScene(task, steps, root, now)
                 continue
+            }
+            // 同页面目标从无到有:内容变化事件重评时,目标节点重新出现视为新的一轮,
+            // 重置计数/匹配窗(需在 schedulable 过滤前做——已休眠的规则也要有机会恢复)
+            if (eventType == "windowContentChanged") {
+                for (rule in task.rules) {
+                    if (rule.triggerOnAbsent) continue
+                    val stateKey = "${task.id}|${rule.key}"
+                    val selector = rule.matches.lastOrNull() ?: rule.anyMatches.firstOrNull() ?: continue
+                    val present = selector.find(root).isNotEmpty()
+                    synchronized(this) {
+                        if (targetPresentStates[stateKey] == false && present) {
+                            resetExecCounters(task, now)
+                        }
+                        targetPresentStates[stateKey] = present
+                    }
+                }
             }
             // 事件类型过滤:规则未订阅当前事件类型则跳过(空列表 = 默认状态+内容变化双订阅)
             val ranked = task.rules
@@ -467,6 +486,11 @@ class TaskRunner(private val service: DramaAccessibilityService) {
             task.packageName == packageName ||
                 (task.packageName.isEmpty() && task.resetMatch == GkdTask.ResetMatch.App)
         }
+        targetPresentStates.entries.removeIf { (k, _) ->
+            val task = tasks.firstOrNull { it.id == k.substringBefore('|') }
+            task?.packageName == packageName ||
+                (task != null && task.packageName.isEmpty() && task.resetMatch == GkdTask.ResetMatch.App)
+        }
         jobs.entries.removeIf { entry ->
             val task = tasks.firstOrNull { it.id == entry.key.substringBefore('|') }
             val hit = task?.packageName == packageName ||
@@ -486,6 +510,7 @@ class TaskRunner(private val service: DramaAccessibilityService) {
         sceneJobs.values.forEach { it.cancel() }
         sceneJobs.clear()
         execStates.clear()
+        targetPresentStates.clear()
     }
 
     /** 启动单条规则执行;actionDelay 二次确认后执行 */
