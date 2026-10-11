@@ -10,6 +10,7 @@ import android.graphics.drawable.GradientDrawable
 import android.os.Handler
 import android.os.Looper
 import android.util.TypedValue
+import android.view.Display
 import android.view.Gravity
 import android.view.MotionEvent
 import android.view.View
@@ -246,16 +247,18 @@ class OverlayWindowListWindow(private val service: AccessibilityService) {
         val container = listView ?: return
         container.removeAllViews()
 
-        // 排除本应用窗口:悬浮球、节点卡片、本卡片、一像素层都会出现在 service.windows 里,
+        // 排除本应用窗口:悬浮球、节点卡片、本卡片、一像素层都会出现在窗口列表里,
         // 不排除会把自己框进列表,干扰对其他应用窗口的观察
         val self = service.packageName
-        val all = runCatching { service.windows }.getOrNull().orEmpty()
-        // LinkedHashMap:保持 service.windows 自上而下的层级顺序,组按首次出现次序排列
-        val groups = LinkedHashMap<String, MutableList<AccessibilityWindowInfo>>()
-        for (w in all) {
+        // getWindows() 只返回默认显示器的窗口,系统小窗/自由窗口在部分 ROM 上跑在虚拟显示器,
+        // 整个会漏掉;故合并全部显示器的窗口,按显示器分段展示
+        val all = windowEntries()
+        // LinkedHashMap:保持自上而下的层级顺序,组按首次出现次序排列
+        val groups = LinkedHashMap<Pair<Int, String>, MutableList<AccessibilityWindowInfo>>()
+        for ((displayId, w) in all) {
             val pkg = runCatching { w.root?.packageName?.toString() }.getOrNull().orEmpty()
             if (pkg == self) continue
-            groups.getOrPut(pkg) { mutableListOf() }.add(w)
+            groups.getOrPut(displayId to pkg) { mutableListOf() }.add(w)
         }
         if (groups.isEmpty()) {
             container.addView(hint(
@@ -265,11 +268,46 @@ class OverlayWindowListWindow(private val service: AccessibilityService) {
             return
         }
 
+        // 仅当存在非默认显示器的窗口时才插入显示器分段标题
+        val showDisplays = groups.keys.any { it.first != Display.DEFAULT_DISPLAY }
         var index = 0
-        for ((pkg, list) in groups) {
+        var lastDisplay = Int.MIN_VALUE
+        for ((key, list) in groups) {
+            val (displayId, pkg) = key
+            if (showDisplays && displayId != lastDisplay) {
+                container.addView(displayHeader(displayId))
+                lastDisplay = displayId
+            }
             container.addView(groupHeader(pkg, list.size))
             for (w in list) container.addView(windowRow(++index, w, pkg))
         }
+    }
+
+    /**
+     * 全部显示器上的窗口(默认显示器在前),元素为 显示器 id 到窗口。
+     * getWindowsOnAllDisplays 不可用时退回 getWindows(仅默认显示器)
+     */
+    private fun windowEntries(): List<Pair<Int, AccessibilityWindowInfo>> {
+        val perDisplay = runCatching { service.windowsOnAllDisplays }.getOrNull()
+        if (perDisplay != null && perDisplay.size() > 0) {
+            val entries = ArrayList<Pair<Int, AccessibilityWindowInfo>>()
+            for (i in 0 until perDisplay.size()) {
+                val displayId = perDisplay.keyAt(i)
+                for (w in perDisplay.valueAt(i).orEmpty()) entries += displayId to w
+            }
+            if (entries.isNotEmpty()) return entries
+        }
+        return runCatching { service.windows }.getOrNull().orEmpty()
+            .map { Display.DEFAULT_DISPLAY to it }
+    }
+
+    /** 显示器分段标题:多显示器(含虚拟显示器)时区分窗口归属 */
+    private fun displayHeader(displayId: Int): TextView = TextView(service).apply {
+        text = if (displayId == Display.DEFAULT_DISPLAY) "显示器 $displayId(主)" else "显示器 $displayId"
+        setTextColor(ACCENT)
+        setTextSize(TypedValue.COMPLEX_UNIT_SP, 10f)
+        typeface = Typeface.DEFAULT_BOLD
+        setPadding(dp(8), dp(8), dp(8), dp(2))
     }
 
     /** 组头:应用名 + 窗口数(第一行),包名(第二行) */
