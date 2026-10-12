@@ -7,8 +7,8 @@ activityCompose = "1.13.0"
 composeBom = "2025.10.00"
 material3 = "1.4.0"
 shizuku = "13.1.5"
-hiddenApiBypass = "6.1"
-kotlinxSerialization = "1.9.0"
+# 液态玻璃(毛玻璃/透镜折射)库;1.0.0 是唯一以 Kotlin 2.2.x 元数据发布、且 Compose 基线 1.9.4 的版本
+kyantBackdrop = "1.0.0"
 
 [libraries]
 androidx-core-ktx = { group = "androidx.core", name = "core-ktx", version.ref = "coreKtx" }
@@ -26,11 +26,8 @@ shizuku-api = { group = "dev.rikka.shizuku", name = "api", version.ref = "shizuk
 shizuku-provider = { group = "dev.rikka.shizuku", name = "provider", version.ref = "shizuku" }
 # AIDL stub(IShizukuService/IRemoteProcess):api 不含,需单独引入才能走 newProcess 执行 shell 命令
 shizuku-aidl = { group = "dev.rikka.shizuku", name = "aidl", version.ref = "shizuku" }
-# 绕过 Android 9+ hidden API 限制,解锁 IActivityTaskManager 反射(查前台 Activity)
-hidden-api-bypass = { group = "org.lsposed.hiddenapibypass", name = "hiddenapibypass", version.ref = "hiddenApiBypass" }
-kotlinx-serialization-json = { group = "org.jetbrains.kotlinx", name = "kotlinx-serialization-json", version.ref = "kotlinxSerialization" }
+kyant-backdrop = { group = "io.github.kyant0", name = "backdrop", version.ref = "kyantBackdrop" }
 
 [plugins]
 android-application = { id = "com.android.application", version.ref = "agp" }
 kotlin-compose = { id = "org.jetbrains.kotlin.plugin.compose", version.ref = "kotlin" }
-kotlin-serialization = { id = "org.jetbrains.kotlin.plugin.serialization", version.ref = "kotlin" }

@@ -18,13 +18,31 @@ import android.view.accessibility.AccessibilityNodeInfo
 import android.view.accessibility.AccessibilityWindowInfo
 import java.util.HashSet
 import java.util.concurrent.CopyOnWriteArrayList
+import com.yzjdev.autotask.automation.log.AppLog
+import com.yzjdev.autotask.automation.log.LogSource
+
+/**
+ * 窗口类别:在无障碍的窗口类型之上再细分 ——
+ * 系统窗口里分出通知栏与导航栏,应用窗口里分出桌面,列表与头部才能一眼分辨。
+ */
+enum class WindowKind(val label: String) {
+    Launcher("桌面"),
+    StatusBar("通知栏"),
+    NavigationBar("导航栏"),
+    Application("应用"),
+    InputMethod("输入法"),
+    AccessibilityOverlay("无障碍悬浮"),
+    SplitScreenDivider("分屏分割"),
+    System("系统"),
+    Other("其他"),
+}
 
 /**
  * 无障碍服务:提供界面节点读取、控件定位、模拟点击与手势。
  *
  * 典型用法:
  * ```kotlin
- * val service = DramaAccessibilityService.instance ?: return
+ * val service = AutoTaskAccessibilityService.instance ?: return
  * service.clickByText("播放")
  * service.findNodeByText("下一集")?.let { service.clickNode(it) }
  * service.swipeUp()
@@ -33,16 +51,16 @@ import java.util.concurrent.CopyOnWriteArrayList
  * 服务需在系统「无障碍」中开启;拥有「写入安全设置」权限时也可由自动化层
  * 直接写入 [android.provider.Settings.Secure.ENABLED_ACCESSIBILITY_SERVICES] 完成开关。
  */
-open class DramaAccessibilityService : AccessibilityService() {
+open class AutoTaskAccessibilityService : AccessibilityService() {
 
     companion object {
         private val MAIN = Handler(Looper.getMainLooper())
 
         @Volatile
-        private var sInstance: DramaAccessibilityService? = null
+        private var sInstance: AutoTaskAccessibilityService? = null
 
         /** 当前服务实例;未开启时为 null */
-        val instance: DramaAccessibilityService?
+        val instance: AutoTaskAccessibilityService?
             get() = sInstance
 
         /** 无障碍服务是否处于已连接状态(用于门禁判断) */
@@ -77,21 +95,6 @@ open class DramaAccessibilityService : AccessibilityService() {
         fun notifyOverlayShowing(showing: Boolean) {
             MAIN.post { overlayListeners.toList().forEach { it(showing) } }
         }
-
-        // 窗口列表悬浮窗显隐监听:卡片自身 ✕ 关闭等非主页入口的变化同步主页开关 UI
-        private val windowListListeners = CopyOnWriteArrayList<(Boolean) -> Unit>()
-
-        fun addWindowListListener(listener: (Boolean) -> Unit) {
-            windowListListeners += listener
-        }
-
-        fun removeWindowListListener(listener: (Boolean) -> Unit) {
-            windowListListeners -= listener
-        }
-
-        fun notifyWindowListShowing(showing: Boolean) {
-            MAIN.post { windowListListeners.toList().forEach { it(showing) } }
-        }
     }
 
     /** 单次遍历内已处理节点,避免重复处理 */
@@ -101,8 +104,11 @@ open class DramaAccessibilityService : AccessibilityService() {
     // 无障碍调试悬浮窗:由主页开关控制显隐,连接后不自动显示
     private val debugOverlay = OverlayDebugWindow(this)
 
-    // 窗口列表悬浮窗:枚举所有可见窗口并按应用分组,同样由主页开关控制
-    private val windowListOverlay = OverlayWindowListWindow(this)
+    // 窗口列表悬浮窗:枚举所有可见窗口并按应用分组,由节点悬浮球长按唤起;
+    // 列表打开期间隐藏悬浮球,关闭后恢复
+    private val windowListOverlay = OverlayWindowListWindow(this) { showing ->
+        debugOverlay.setBallVisible(!showing)
+    }
 
     // 一像素完全透明悬浮窗:触摸穿透,不遮挡不影响任何操作
     private var pixelView: View? = null
@@ -141,9 +147,6 @@ open class DramaAccessibilityService : AccessibilityService() {
         pixelView = null
     }
 
-    /** 任务引擎 v4:窗口切换时匹配任务并执行(协程顺序流) */
-    val taskRunner = TaskRunner(this)
-
     override fun onCreate() {
         super.onCreate()
     }
@@ -153,34 +156,38 @@ open class DramaAccessibilityService : AccessibilityService() {
         sInstance = this
         clearProcessed()
         notifyRunning(true)
-        // 服务连接时加载持久化任务,立即生效
-        val loaded = TaskStore.loadAll(this)
-        taskRunner.setTasks(loaded)
-        LogStore.log("🔌 无障碍服务已连接,加载任务 ${loaded.size} 个")
         showPixelOverlay()
+        AppLog.success(LogSource.Service, "无障碍服务已连接")
     }
 
     /** 调试悬浮球当前是否显示 */
     val isDebugOverlayShowing: Boolean
         get() = debugOverlay.isShowing
 
-    /** 窗口列表悬浮窗当前是否显示 */
-    val isWindowListShowing: Boolean
-        get() = windowListOverlay.isShowing
-
     /** 显示/隐藏调试悬浮球(由主页开关调用);服务未连接时返回 false */
     fun showDebugOverlay(show: Boolean): Boolean {
         val overlay = debugOverlay
-        if (show) overlay.show() else overlay.hide()
+        if (show) {
+            overlay.show()
+        } else {
+            overlay.hide()
+            // 悬浮球已隐藏,窗口列表失去入口:一并释放它预加入的窗口
+            windowListOverlay.release()
+        }
+        AppLog.info(LogSource.Overlay, if (show) "节点悬浮窗已开启" else "节点悬浮窗已关闭")
         notifyOverlayShowing(show && sInstance != null)
         return sInstance != null
     }
 
-    /** 显示/隐藏窗口列表悬浮窗(由主页开关调用);服务未连接时返回 false */
-    fun showWindowListOverlay(show: Boolean): Boolean {
-        val overlay = windowListOverlay
-        if (show) overlay.show() else overlay.hide()
-        notifyWindowListShowing(show && sInstance != null)
+    /** 预加入窗口列表悬浮窗(隐藏态):由调试悬浮窗在信息卡之后、悬浮球之前调用,保证层级 */
+    fun prepareWindowListOverlay() {
+        windowListOverlay.prepare()
+    }
+
+    /** 唤起窗口列表悬浮窗(由节点悬浮球长按调用);服务未连接时返回 false */
+    fun showWindowListOverlay(): Boolean {
+        AppLog.info(LogSource.Overlay, "窗口列表已打开")
+        windowListOverlay.show()
         return sInstance != null
     }
 
@@ -192,14 +199,13 @@ open class DramaAccessibilityService : AccessibilityService() {
     fun hideWindowBounds() = debugOverlay.hideBounds()
 
     override fun onUnbind(intent: Intent?): Boolean {
-        LogStore.log("🔌 无障碍服务已断开(unbind)")
         sInstance = null
         clearProcessed()
         notifyRunning(false)
-        taskRunner.cancelAll()
         debugOverlay.hide()
-        windowListOverlay.hide()
+        windowListOverlay.release()
         hidePixelOverlay()
+        AppLog.warn(LogSource.Service, "无障碍服务已断开")
         return super.onUnbind(intent)
     }
 
@@ -207,9 +213,8 @@ open class DramaAccessibilityService : AccessibilityService() {
         sInstance = null
         clearProcessed()
         notifyRunning(false)
-        taskRunner.cancelAll()
         debugOverlay.hide()
-        windowListOverlay.hide()
+        windowListOverlay.release()
         hidePixelOverlay()
         super.onDestroy()
     }
@@ -233,36 +238,16 @@ open class DramaAccessibilityService : AccessibilityService() {
         when (event.eventType) {
             AccessibilityEvent.TYPE_WINDOW_STATE_CHANGED -> {
                 val className = event.className?.toString() ?: ""
-                // 窗口列表悬浮窗按前台切换自动重排
+                // 调试悬浮窗标题跟随前台窗口切换
                 notifyWindowChanged()
-                // 对齐 GKD A11yState.updateTopActivity:真实 Activity 才记录并回填,
-                // 非真实 Activity(Dialog/输入法等)沿用该应用最近一次有效 Activity 名,
-                // 保证规则 activityIds 匹配不因窗口类名失效
+                // 真实 Activity 才记录并回填:非真实 Activity(Dialog/输入法等)沿用
+                // 该应用最近一次有效 Activity 名,保证悬浮窗标题不因窗口类名失效
                 if (packageName != null && isActivityClassName(className) && isRealActivity(packageName, className)) {
                     val cn = ComponentName(packageName, className)
                     lastActivity = cn
                     recordValidActivity(cn)
-                    onWindowChanged(packageName, className)
-                } else {
-                    // 非 Activity 窗口(Dialog/输入法):只驱动评估,不触发 resetMatch 重置
-                    taskRunner.onEvent(packageName ?: "", activityFor(packageName ?: ""), "windowStateChanged")
                 }
             }
-
-            AccessibilityEvent.TYPE_WINDOW_CONTENT_CHANGED ->
-                onContentChanged(packageName ?: "", event.className?.toString() ?: "")
-
-            // 其余事件类型(viewFocused/viewClicked/viewLongClicked/viewTextChanged)按需转发,
-            // 供订阅了对应 eventTypes 的规则评估;未订阅的规则会被 runner 过滤掉。
-            // Activity 一律按「焦点激活窗口」解析,不用 lastActivity 缓存(可能来自后台应用/旧页面)
-            AccessibilityEvent.TYPE_VIEW_FOCUSED ->
-                taskRunner.onEvent(packageName ?: "", activityFor(packageName ?: ""), "viewFocused")
-            AccessibilityEvent.TYPE_VIEW_TEXT_CHANGED ->
-                taskRunner.onEvent(packageName ?: "", activityFor(packageName ?: ""), "viewTextChanged")
-            AccessibilityEvent.TYPE_VIEW_CLICKED ->
-                taskRunner.onEvent(packageName ?: "", activityFor(packageName ?: ""), "viewClicked")
-            AccessibilityEvent.TYPE_VIEW_LONG_CLICKED ->
-                taskRunner.onEvent(packageName ?: "", activityFor(packageName ?: ""), "viewLongClicked")
 
             else -> Unit
         }
@@ -275,7 +260,7 @@ open class DramaAccessibilityService : AccessibilityService() {
     var lastActivity: ComponentName? = null
         private set
 
-    /** 各应用最近一次确认的真实 Activity(非 Activity 窗口事件时按包名回填,对齐 GKD lastValidActivity) */
+    /** 各应用最近一次确认的真实 Activity(非 Activity 窗口事件时按包名回填) */
     private val lastValidActivityByApp = HashMap<String, ComponentName>()
 
     private fun recordValidActivity(cn: ComponentName) {
@@ -286,6 +271,69 @@ open class DramaAccessibilityService : AccessibilityService() {
 
     fun getValidActivity(pkg: String): ComponentName? = synchronized(lastValidActivityByApp) {
         lastValidActivityByApp[pkg]
+    }
+
+    /**
+     * 指定窗口对应的 Activity:
+     *  - 应用窗口的 title 即 flattenToShortString("pkg/.MainActivity"),直接采用;
+     *  - title 不是组件形式(对话框/系统窗口)时,回退到该包最近确认过的真实 Activity。
+     * 节点信息悬浮窗与窗口列表都用它,避免两处各写一套解析规则。
+     */
+    fun activityOfWindow(window: AccessibilityWindowInfo): ComponentName? {
+        val title = runCatching { window.title?.toString()?.trim() }.getOrNull().orEmpty()
+        if (title.contains('/')) {
+            ComponentName.unflattenFromString(title)?.let { return it }
+        }
+        val pkg = runCatching { window.root?.packageName?.toString() }.getOrNull().orEmpty()
+        if (pkg.isEmpty()) return null
+        return getValidActivity(pkg)
+    }
+
+    /** 桌面(Launcher)包名:用于把桌面从普通应用窗口里分出来;解析失败为 null */
+    val homePackage: String? by lazy {
+        runCatching {
+            val intent = Intent(Intent.ACTION_MAIN).addCategory(Intent.CATEGORY_HOME)
+            packageManager.resolveActivity(
+                intent,
+                android.content.pm.PackageManager.MATCH_DEFAULT_ONLY,
+            )?.activityInfo?.packageName
+        }.getOrNull()
+    }
+
+    /**
+     * 窗口类别细分:
+     *  - 应用窗口按 Launcher 包名分出「桌面」;
+     *  - 系统窗口先按根节点类名分出「通知栏 / 导航栏」,类名读不到时按贴边位置兜底。
+     */
+    fun windowKind(window: AccessibilityWindowInfo): WindowKind {
+        val pkg = runCatching { window.root?.packageName?.toString() }.getOrNull().orEmpty()
+        if (pkg.isNotEmpty() && pkg == homePackage) return WindowKind.Launcher
+        return when (window.type) {
+            AccessibilityWindowInfo.TYPE_SYSTEM -> systemBarKind(window)
+            AccessibilityWindowInfo.TYPE_APPLICATION -> WindowKind.Application
+            AccessibilityWindowInfo.TYPE_INPUT_METHOD -> WindowKind.InputMethod
+            AccessibilityWindowInfo.TYPE_ACCESSIBILITY_OVERLAY -> WindowKind.AccessibilityOverlay
+            AccessibilityWindowInfo.TYPE_SPLIT_SCREEN_DIVIDER -> WindowKind.SplitScreenDivider
+            else -> WindowKind.Other
+        }
+    }
+
+    /** 系统窗口里区分通知栏与导航栏:类名优先,读不到时按「贴顶/贴底且矮」兜底 */
+    private fun systemBarKind(window: AccessibilityWindowInfo): WindowKind {
+        val cls = runCatching { window.root?.className?.toString() }.getOrNull()
+            .orEmpty().lowercase()
+        if (cls.contains("statusbar") || cls.contains("status_bar")) return WindowKind.StatusBar
+        if (cls.contains("navigationbar") || cls.contains("navigation_bar")) {
+            return WindowKind.NavigationBar
+        }
+        val rect = android.graphics.Rect().also { runCatching { window.getBoundsInScreen(it) } }
+        val screenH = resources.displayMetrics.heightPixels
+        val maxBarHeight = (screenH / 8).coerceAtLeast(1)
+        if (rect.height() in 1..maxBarHeight) {
+            if (rect.top <= 0) return WindowKind.StatusBar
+            if (rect.bottom >= screenH) return WindowKind.NavigationBar
+        }
+        return WindowKind.System
     }
 
     /** 焦点且激活的窗口(优先应用窗口):规则执行、节点快照与悬浮窗标题只认这个来源 */
@@ -322,15 +370,6 @@ open class DramaAccessibilityService : AccessibilityService() {
         return lastActivity
     }
 
-    /** 事件所属应用的当前 Activity:同包名的焦点激活窗口优先,否则用该包已确认的 Activity */
-    private fun activityFor(pkg: String): String {
-        val cur = currentActivity()
-        if (cur != null && cur.packageName == pkg) return cur.className
-        return getValidActivity(pkg)?.className
-            ?: lastActivity?.takeIf { it.packageName == pkg }?.className
-            ?: ""
-    }
-
     /** 窗口状态变化监听(节点悬浮窗标题跟随 + 窗口列表重排;监听方自行切主线程) */
     private val windowListeners = CopyOnWriteArrayList<() -> Unit>()
 
@@ -354,7 +393,7 @@ open class DramaAccessibilityService : AccessibilityService() {
             !cls.startsWith("android.view") &&
             cls != "android.widget.FrameLayout"
 
-    /** getActivityInfo 反查结果 LRU 缓存(对齐 GKD ActivityCache):避免高频事件下重复 binder 反查 */
+    /** getActivityInfo 反查结果 LRU 缓存:避免高频事件下重复 binder 反查 */
     private val activityCache = android.util.LruCache<Pair<String, String>, Boolean>(256)
 
     /** getActivityInfo 反查:确认 pkg/cls 确实是已注册的 Activity(非 Activity 窗口会抛异常) */
@@ -363,47 +402,6 @@ open class DramaAccessibilityService : AccessibilityService() {
             packageManager.getActivityInfo(ComponentName(pkg, cls), 0)
             true // getActivityInfo 未抛异常即为已注册(返回值恒非 null)
         }.getOrDefault(false).also { activityCache.put(pkg to cls, it) }
-
-    /** 窗口切换(进入新页面 / 播放页):先驱动任务引擎,再留给子类扩展 */
-    open fun onWindowChanged(packageName: String, className: String) {
-        // 前台包名变化时通知引擎:离开的目标包清去重、停循环(下次进入重新执行)
-        if (packageName != lastForegroundPkg) {
-            val prev = lastForegroundPkg
-            lastForegroundPkg = packageName
-            if (prev != null) taskRunner.onLeftPackage(prev)
-        }
-        // GKD updateTopActivity:同 Activity 的 STATE_CHANGED 也去抖后走 resetMatch 重置
-        taskRunner.onActivityChanged(packageName, className)
-    }
-
-    /** 任务表变更后按当前前台页面重新评估触发(避免停留在目标页时保存的任务不响应) */
-    fun refreshTaskTriggers() {
-        val cn = currentActivity() ?: return
-        val pkg = cn.packageName ?: return
-        lastForegroundPkg = pkg
-        LogStore.log("🔁 任务表变更,按当前页面重新评估触发")
-        taskRunner.onActivityChanged(pkg, cn.className)
-    }
-
-    /** 最近一次窗口事件的前台包名(onLeftPackage 检测用) */
-    private var lastForegroundPkg: String? = null
-
-    /** 内容变化去抖:按焦点激活窗口的 Activity 重新评估订阅了 windowContentChanged 事件的规则 */
-    private val contentDebounce = Runnable {
-        // 以焦点激活窗口为准(切回后台 App 未发 STATE_CHANGED 时也能拿到真实前台 Activity),
-        // 窗口列表不可用时退回活动根节点所属应用
-        val cur = currentActivity()
-        val pkg = cur?.packageName ?: rootInActiveWindow?.packageName?.toString() ?: return@Runnable
-        lastForegroundPkg = pkg
-        taskRunner.onContentChanged(pkg, cur?.className ?: "")
-    }
-
-    /** 内容变化:很多界面切换(对话框/弹窗/网页内跳转)只发 CONTENT 事件不发 STATE_CHANGED,
-     * 去抖 300ms 后按当前 Activity 重新评估订阅了 windowContentChanged 事件的规则 */
-    open fun onContentChanged(packageName: String, className: String) {
-        MAIN.removeCallbacks(contentDebounce)
-        MAIN.postDelayed(contentDebounce, 300)
-    }
 
     // ---- 节点遍历 ----
 

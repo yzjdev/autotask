@@ -1,7 +1,6 @@
 plugins {
     alias(libs.plugins.android.application)
     alias(libs.plugins.kotlin.compose)
-    alias(libs.plugins.kotlin.serialization)
 }
 
 android {
@@ -76,9 +75,6 @@ dependencies {
     implementation(libs.shizuku.provider)
     implementation(libs.shizuku.aidl)
 
-    // 绕过 hidden API 限制,解锁 IActivityTaskManager 反射(查前台 Activity,不依赖事件/Shizuku)
-    implementation(libs.hidden.api.bypass)
-
-    // v4 任务模型序列化(Task/Step/Trigger 密封类落盘 SharedPreferences)
-    implementation(libs.kotlinx.serialization.json)
+    // 液态玻璃底部导航:内容层做毛玻璃 + 透镜折射 + 提亮
+    implementation(libs.kyant.backdrop)
 }

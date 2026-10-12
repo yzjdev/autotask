@@ -21,17 +21,11 @@
     <uses-permission android:name="android.permission.WRITE_SECURE_SETTINGS" />
 
     <!--
-        getActivityInfo 校验目标应用任意 Activity 需要 packages 查询权限
-        (Android 11+ package visibility):否则对所有未声明可见性的应用抛
-        NameNotFoundException,gkd 的 isActivity 同款校验也会全部失效。
-        参考 gkd-app/AndroidManifest.xml 的做法,直接声明 QUERY_ALL_PACKAGES。
+        getActivityInfo 校验目标应用任意 Activity、以及应用列表的
+        getInstalledPackages 都需要 packages 查询权限(Android 11+ package
+        visibility):否则对所有未声明可见性的应用抛 NameNotFoundException。
     -->
     <uses-permission android:name="android.permission.QUERY_ALL_PACKAGES" />
-
-    <!--
-        INTERNET:远程订阅(updateUrl)拉取订阅 JSON5 所需,GKD 订阅功能同款。
-    -->
-    <uses-permission android:name="android.permission.INTERNET" />
 
     <!--
         SYSTEM_ALERT_WINDOW 已移除:悬浮窗(OverlayDebugWindow/OverlayToggleWindow/
@@ -49,7 +43,6 @@
     <application
         android:name=".AutoTaskApplication"
         android:allowBackup="true"
-        android:usesCleartextTraffic="true"
         android:icon="@mipmap/ic_launcher"
         android:roundIcon="@mipmap/ic_launcher_round"
         android:label="@string/app_name"
@@ -96,7 +89,7 @@
             android:theme="@style/Theme.AutoTask" />
 
         <!-- 无障碍服务: manifest 注册 SelectToSpeakService(系统级服务名,绕过部分
-             应用的混淆节点/服务名校验),实际业务逻辑在其父类 DramaAccessibilityService 中 -->
+             应用的混淆节点/服务名校验),实际业务逻辑在其父类 AutoTaskAccessibilityService 中 -->
         <service
             android:name="com.google.android.accessibility.selecttospeak.SelectToSpeakService"
             android:enabled="true"

@@ -7,6 +7,7 @@ import android.graphics.Color
 import android.graphics.Paint
 import android.graphics.PixelFormat
 import android.graphics.Rect
+import android.graphics.drawable.GradientDrawable
 import android.os.Handler
 import android.os.Looper
 import android.util.TypedValue
@@ -21,6 +22,9 @@ import android.widget.HorizontalScrollView
 import android.widget.LinearLayout
 import android.widget.ScrollView
 import android.widget.TextView
+
+/** 悬浮窗整体不透明度:调试卡片、节点树抽屉与窗口列表共用同一值(越大越不透明) */
+internal const val OVERLAY_ALPHA = 0.92f
 
 /**
  * 无障碍节点检查悬浮窗(选中模式):
@@ -42,8 +46,12 @@ class OverlayDebugWindow(private val service: AccessibilityService) {
     private val wm by lazy { service.getSystemService(WindowManager::class.java) }
     private val mainHandler = Handler(Looper.getMainLooper())
 
-    // 开关悬浮球:独立 UI,点击回调切换抓取状态,长按关闭整个悬浮窗
-    private val toggleWindow = OverlayToggleWindow(service, { toggleCapture() }, { hide() })
+    // 开关悬浮球:独立 UI,单击绘制/收起焦点激活窗口的节点边界,长按唤起窗口列表
+    private val toggleWindow = OverlayToggleWindow(
+        service,
+        { toggleCapture() },
+        { (service as? AutoTaskAccessibilityService)?.showWindowListOverlay() },
+    )
 
     private var cardView: LinearLayout? = null
     private var titleView: TextView? = null
@@ -69,7 +77,10 @@ class OverlayDebugWindow(private val service: AccessibilityService) {
             WindowManager.LayoutParams.TYPE_ACCESSIBILITY_OVERLAY,
             WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE,
             PixelFormat.TRANSLUCENT,
-        ).apply { gravity = Gravity.CENTER }
+        ).apply {
+            gravity = Gravity.CENTER
+            alpha = OVERLAY_ALPHA
+        }
     }
 
     /** 边框绘制层:显式用整块显示器尺寸(含状态栏),可点击命中(底层层级) */
@@ -96,7 +107,10 @@ class OverlayDebugWindow(private val service: AccessibilityService) {
             WindowManager.LayoutParams.TYPE_ACCESSIBILITY_OVERLAY,
             WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE,
             PixelFormat.TRANSLUCENT,
-        ).apply { gravity = Gravity.BOTTOM or Gravity.CENTER_HORIZONTAL }
+        ).apply {
+            gravity = Gravity.BOTTOM or Gravity.CENTER_HORIZONTAL
+            alpha = OVERLAY_ALPHA
+        }
     }
 
     /** 节点信息抓取开关状态 */
@@ -108,8 +122,15 @@ class OverlayDebugWindow(private val service: AccessibilityService) {
     private var snapshots: List<NodeSnapshot> = emptyList()
     private var selectedIndex = -1
 
-    /** 最近一次抓取的应用名(卡片被 ✕ 关闭后重建标题栏用) */
-    private var lastAppName = ""
+    /** 已折叠的节点下标:折叠后其子孙不在树中展开;每次重新抓取/清空快照时重置 */
+    private val collapsedNodes = HashSet<Int>()
+
+    /** 卡片头部两行:应用名与 Activity 全名。同源取用,不再靠拼接字符串再拆解 */
+    private var headerTitle = ""
+    private var headerActivity = ""
+
+    /** 头部是否锁定在窗口列表点选的窗口上:锁定时不再跟随焦点激活窗口刷新 */
+    private var headerPinned = false
 
     /** 本次抓取的窗口根包名:标题只接受与之一致的 Activity 来源,防桌面/系统窗口污染 */
     @Volatile
@@ -125,29 +146,46 @@ class OverlayDebugWindow(private val service: AccessibilityService) {
      */
     private val windowListener: () -> Unit = {
         mainHandler.post {
-            val cn = (service as? com.yzjdev.autotask.automation.DramaAccessibilityService)
-                ?.currentActivity() ?: return@post
-            if (capturePkg == null || cn.packageName == capturePkg) applyHeader(cn)
+            // 头部锁定在窗口列表点选的窗口时,不跟随焦点窗口改写
+            if (headerPinned) return@post
+            val svc = service as? com.yzjdev.autotask.automation.AutoTaskAccessibilityService
+                ?: return@post
+            val cn = svc.currentActivity() ?: return@post
+            val pkg = cn.packageName ?: return@post
+            if (capturePkg == null || pkg == capturePkg) {
+                val kind = svc.focusedWindow()?.let { svc.windowKind(it) }
+                applyHeader(headerName(kind, pkg), pkg, cn.className)
+            }
         }
     }
 
-    /** 标题格式:应用名(包名/Activity 短类名) */
-    private fun formatTitle(cn: android.content.ComponentName): String =
-        "${appLabel(cn.packageName ?: "")}(${cn.packageName}/${cn.shortClassName})"
+    /** 头部第一行的名字:通知栏/导航栏/桌面用类别名,其余用应用名 */
+    private fun headerName(kind: WindowKind?, pkg: String): String = when (kind) {
+        WindowKind.Launcher, WindowKind.StatusBar, WindowKind.NavigationBar -> kind.label
+        else -> appLabel(pkg)
+    }
 
-    /** 头部两行:第一行应用名,第二行单独显示 Activity 全名 */
-    private fun applyHeader(cn: android.content.ComponentName) {
-        lastAppName = formatTitle(cn)
-        titleView?.text = appLabel(cn.packageName ?: "")
-        activityView?.text = "${cn.packageName}/${cn.shortClassName}"
+    /**
+     * 写入头部两行:第一行「应用名(包名)」,第二行完整 Activity 类名(不再带包名前缀)。
+     * 卡片已存在时即时改写。
+     */
+    private fun applyHeader(name: String, pkg: String, activity: String) {
+        val title = if (pkg.isEmpty()) name else "$name($pkg)"
+        headerTitle = title
+        headerActivity = activity
+        titleView?.text = title
+        // 没有 Activity 就整行收起,不写占位文字
+        activityView?.apply {
+            text = activity
+            visibility = if (activity.isBlank()) View.GONE else View.VISIBLE
+        }
     }
 
     // ---- 控制面板(开关悬浮球,独立 UI)----
 
     /**
-     * 开启开关:一次性依次添加三个窗口(绘制层 → 信息卡片 → 悬浮球),
-     * 同层级窗口按添加顺序叠放,后加的在上:绘制层在底,悬浮球在最上,
-     * 天态层级即正确,无需 bringToFront 补救。
+     * 开启开关:依次添加四个窗口(绘制层 → 信息卡片 → 窗口列表 → 悬浮球),
+     * 同层级窗口按添加顺序叠放,后加的在上:绘制层在底,悬浮球在最上。
      * 卡片与绘制层初始 GONE,后续只切 visibility,不再动态 addView/removeView,
      * 避免抓取/选中时窗口反复重建导致的闪烁与层级跳动。
      */
@@ -155,22 +193,26 @@ class OverlayDebugWindow(private val service: AccessibilityService) {
         mainHandler.post {
             ensureBoundsView()
             boundsView?.visibility = View.GONE
-            ensureInfoCard(lastAppName)
+            ensureInfoCard(headerTitle, headerActivity)
             cardView?.visibility = View.GONE
+            // 窗口列表提前加入(隐藏态):层级落在信息卡之后、悬浮球之前
+            (service as? com.yzjdev.autotask.automation.AutoTaskAccessibilityService)
+                ?.prepareWindowListOverlay()
             // 订阅前台窗口切换,标题实时跟随(悬浮窗显示期间)
-            (service as? com.yzjdev.autotask.automation.DramaAccessibilityService)
+            (service as? com.yzjdev.autotask.automation.AutoTaskAccessibilityService)
                 ?.addWindowListener(windowListener)
-            // 悬浮球最后创建,天然位于最上层
+            // 悬浮球最后创建并置顶,天然位于最上层
             toggleWindow.show()
-            DramaAccessibilityService.notifyOverlayShowing(true)
+            toggleWindow.bringToFront()
+            AutoTaskAccessibilityService.notifyOverlayShowing(true)
         }
     }
 
     fun hide() {
         mainHandler.post {
-            (service as? com.yzjdev.autotask.automation.DramaAccessibilityService)
+            (service as? com.yzjdev.autotask.automation.AutoTaskAccessibilityService)
                 ?.removeWindowListener(windowListener)
-            DramaAccessibilityService.notifyOverlayShowing(false)
+            AutoTaskAccessibilityService.notifyOverlayShowing(false)
             removeCaptureViews()
             toggleWindow.hide()
             captureEnabled = false
@@ -180,6 +222,18 @@ class OverlayDebugWindow(private val service: AccessibilityService) {
 
     val isShowing: Boolean
         get() = toggleWindow.isShowing
+
+    /** 窗口列表打开期间隐藏悬浮球,关闭后恢复;恢复时重新置顶 */
+    fun setBallVisible(visible: Boolean) {
+        mainHandler.post {
+            if (visible) {
+                toggleWindow.show()
+                toggleWindow.bringToFront()
+            } else {
+                toggleWindow.hide()
+            }
+        }
+    }
 
     // ---- 窗口列表点选:只画指定窗口的节点边界 ----
 
@@ -191,10 +245,23 @@ class OverlayDebugWindow(private val service: AccessibilityService) {
         val list = NodeSnapshotCollector.collect(service, window)
         if (list.isEmpty()) return false
         snapshots = list
+        collapsedNodes.clear()
         selectedIndex = -1
         boundsFromWindowList = true
         val pkg = runCatching { window.root?.packageName?.toString() }.getOrNull().orEmpty()
-        lastAppName = if (pkg.isEmpty()) "窗口 ${window.id}" else appLabel(pkg)
+        val svc = service as? com.yzjdev.autotask.automation.AutoTaskAccessibilityService
+        // 头部取该窗口自己的 Activity(不是焦点窗口的),并锁定,避免随后被焦点窗口改写
+        val cn = svc?.activityOfWindow(window)
+        headerPinned = true
+        if (pkg.isEmpty()) {
+            applyHeader("窗口 ${window.id}", "", "")
+        } else {
+            applyHeader(
+                headerName(svc?.windowKind(window), pkg),
+                pkg,
+                cn?.className.orEmpty(),
+            )
+        }
         ensureBoundsView()
         boundsView?.setSnapshots(list)                  // 内含清空上次命中的高亮
         setLayerVisible(boundsLp, boundsView, true)
@@ -236,6 +303,7 @@ class OverlayDebugWindow(private val service: AccessibilityService) {
         // 关闭绘制层:清空上次命中的高亮,下次抓取从干净状态开始
         boundsView?.setSelected(-1)
         snapshots = emptyList()
+        collapsedNodes.clear()
         selectedIndex = -1
     }
 
@@ -276,6 +344,35 @@ class OverlayDebugWindow(private val service: AccessibilityService) {
             setLayerVisible(cardLp, cardView, false)  // 抽屉展开时隐藏节点信息卡片
             treeShown = true
             toggleWindow.bringToFront()
+            scrollTreeToSelected()
+        }
+    }
+
+    /**
+     * 把当前选中节点滚进可视区:已经完整可见就不动(点树里那一行不该跳),
+     * 否则居中显示。行上挂了快照下标(tag),按它找行。
+     */
+    private fun scrollTreeToSelected() {
+        val scroll = treeScroll ?: return
+        val list = treeListView ?: return
+        val target = selectedIndex
+        if (target < 0) return
+        // 等这一帧布局完成再算偏移:此时行高与视口高度才有值
+        scroll.post {
+            val row = (0 until list.childCount)
+                .mapNotNull { list.getChildAt(it) }
+                .firstOrNull { (it.tag as? Int) == target }
+                ?: return@post
+            val viewTop = scroll.scrollY
+            val viewBottom = viewTop + scroll.height
+            val rowTop = row.top
+            val rowBottom = rowTop + row.height
+            if (rowTop >= viewTop && rowBottom <= viewBottom) return@post  // 已完整可见
+            val centered = rowTop - (scroll.height - row.height) / 2
+            val maxY = (list.height - scroll.height).coerceAtLeast(0)
+            scroll.smoothScrollTo(0, centered.coerceIn(0, maxY))
+            // 深层节点的缩进在右侧,横向回到最左,缩进层级才看得见
+            (scroll.getChildAt(0) as? HorizontalScrollView)?.smoothScrollTo(0, 0)
         }
     }
 
@@ -365,9 +462,16 @@ class OverlayDebugWindow(private val service: AccessibilityService) {
             if (depth > 20) return  // 防环
             val s = snapshots.getOrNull(idx) ?: return
             container.addView(treeRow(idx, s, depth))
+            if (idx in collapsedNodes) return  // 已折叠:不展开子孙
             s.children.forEach { dfs(it, depth + 1) }
         }
         snapshots.indices.filter { snapshots[it].parent == -1 }.forEach { dfs(it, 0) }
+    }
+
+    /** 折叠/展开某节点的子树:只影响树的显示,不改变当前选中 */
+    private fun toggleCollapse(idx: Int) {
+        if (!collapsedNodes.add(idx)) collapsedNodes.remove(idx)
+        renderTreeView()
     }
 
     /** 树行双击检测(抽屉级共享一个 GestureDetector,记录当前触控行,避免每行各建一个) */
@@ -390,30 +494,67 @@ class OverlayDebugWindow(private val service: AccessibilityService) {
             })
     }
 
+    /** 树行背景:选中 = 琥珀高亮(整行,横向撑满);可见性交给文字颜色,不占背景 */
+    private fun treeRowBackground(selected: Boolean): android.graphics.drawable.Drawable? =
+        if (selected) {
+            android.graphics.drawable.GradientDrawable().apply {
+                cornerRadius = dp(8).toFloat()
+                setColor(0x33F59E0B.toInt())
+            }
+        } else {
+            null
+        }
+
+    /** 树行文字色:选中 = 琥珀;不可见 = 压暗;可见再按是否可点击分两档亮度 */
+    private fun treeRowTextColor(selected: Boolean, visible: Boolean, clickable: Boolean): Int = when {
+        selected -> 0xFFF59E0B.toInt()
+        !visible -> 0x59FFFFFF.toInt()
+        clickable -> 0xCCFFFFFF.toInt()
+        else -> 0x99FFFFFF.toInt()
+    }
+
     /** 节点树单行:缩进(空格) + 类名(#id/"文本") + 可点击标记,选中行高亮。
-     * 行不省略、不限定宽度,超宽由外层横向 ScrollView 滑动查看。 */
+     * 行内容不省略,超宽由外层横向 ScrollView 滑动查看;
+     * 选中底带挂在整行上:行最小宽度 = 抽屉可见宽度,横向撑满;行高给足,底带有厚度。 */
     private fun treeRow(idx: Int, s: NodeSnapshot, depth: Int): View {
         val selected = idx == selectedIndex
         val row = LinearLayout(service).apply {
+            // 行号会因折叠/略过而与快照下标错位,把下标挂在 tag 上,高亮时按它匹配
+            tag = idx
             orientation = LinearLayout.HORIZONTAL
             gravity = Gravity.CENTER_VERTICAL
-            minimumHeight = dp(26)
-            setPadding(dp(4), dp(2), dp(4), dp(2))
-            isClickable = true
-            setOnTouchListener { _, ev ->
-                treeTapIndex = idx
-                treeTapDetector.onTouchEvent(ev)
+            // 行高比文字高出一圈,选中底带才不会紧贴文字
+            minimumHeight = dp(34)
+            // 抽屉为全屏宽,列表左右各 8dp 内边距,故可见内容宽度 = 屏宽 - 16dp
+            minimumWidth = screenW - dp(16)
+            setPadding(dp(6), dp(4), dp(6), dp(4))
+            background = treeRowBackground(selected)
+            // 不可见节点不可点:选中它们也不会在屏幕上画出任何东西
+            if (s.visible) {
+                isClickable = true
+                setOnTouchListener { _, ev ->
+                    treeTapIndex = idx
+                    treeTapDetector.onTouchEvent(ev)
+                }
             }
-            background = if (selected) android.graphics.drawable.GradientDrawable().apply {
-                cornerRadius = dp(6).toFloat()
-                setColor(0x33F59E0B.toInt())
-            } else null
         }
+        // 折叠箭头:有子节点时可点(▾ 展开 / ▸ 折叠),只切折叠不改选中;叶子节点留空占位
+        val collapsed = idx in collapsedNodes
         row.addView(TextView(service).apply {
-            text = if (s.children.isNotEmpty()) "▾" else "·"
+            text = when {
+                s.children.isEmpty() -> ""
+                collapsed -> "▸"
+                else -> "▾"
+            }
             setTextColor(if (s.children.isNotEmpty()) 0x80F59E0B.toInt() else 0x40FFFFFF.toInt())
             setTextSize(TypedValue.COMPLEX_UNIT_SP, 9f)
-            layoutParams = LinearLayout.LayoutParams(dp(10),
+            gravity = Gravity.CENTER
+            if (s.children.isNotEmpty()) {
+                isClickable = true
+                setPadding(dp(2), dp(7), dp(2), dp(7))
+                setOnClickListener { toggleCollapse(idx) }
+            }
+            layoutParams = LinearLayout.LayoutParams(dp(16),
                 LinearLayout.LayoutParams.WRAP_CONTENT)
         })
         row.addView(TextView(service).apply {
@@ -424,8 +565,7 @@ class OverlayDebugWindow(private val service: AccessibilityService) {
                 append(s.info)
                 if (s.clickable) append(" ⬑")
             }
-            setTextColor(if (selected) 0xFFF59E0B.toInt()
-                else if (s.clickable) 0xCCFFFFFF.toInt() else 0x99FFFFFF.toInt())
+            setTextColor(treeRowTextColor(selected, s.visible, s.clickable))
             setTextSize(TypedValue.COMPLEX_UNIT_SP, 10f)
             typeface = android.graphics.Typeface.MONOSPACE
             maxLines = 1
@@ -443,25 +583,28 @@ class OverlayDebugWindow(private val service: AccessibilityService) {
     private fun captureAndShow() {
         try {
             val list = NodeSnapshotCollector.collect(service)
-            // GKD 用 rootInActiveWindow.packageName 做 appId,但抓取瞬间该值可能已指向
-            // 桌面/系统窗口;无 Shizuku 校验,改用「焦点应用窗口」做基准(更接近真实前台)
+            // 抓取瞬间 rootInActiveWindow.packageName 可能已指向桌面/系统窗口;
+            // 无 Shizuku 校验,改用「焦点应用窗口」做基准(更接近真实前台)
             val anchor = service.windows.firstOrNull {
                 it.isFocused && it.type == android.view.accessibility.AccessibilityWindowInfo.TYPE_APPLICATION
             }?.root ?: service.rootInActiveWindow
             val root = anchor ?: run {
                 snapshots = emptyList()
+                collapsedNodes.clear()
                 selectedIndex = -1
                 return
             }
             val appId = root.packageName?.toString() ?: "Unknown"
-            // GKD resolveActivityId 语义:appId 以无障碍根节点包名为准,
-            // 标题的 Activity 只认「焦点激活窗口」的解析结果(同包名才采用),不用缓存或反射来源
+            // appId 以无障碍根节点包名为准,标题与 Activity 都取「焦点激活窗口」的解析结果
             capturePkg = appId
-            val svc = service as? com.yzjdev.autotask.automation.DramaAccessibilityService
-            val title = svc?.currentActivity()?.takeIf { it.packageName == appId }?.let { formatTitle(it) }
-                ?: "$appId(未知 Activity)"
-            lastAppName = title
+            // 抓取接管头部:解除窗口列表点选时的锁定
+            headerPinned = false
+            val svc = service as? com.yzjdev.autotask.automation.AutoTaskAccessibilityService
+            val cn = svc?.currentActivity()?.takeIf { it.packageName == appId }
+            val kind = svc?.focusedWindow()?.let { svc.windowKind(it) }
+            applyHeader(headerName(kind, appId), appId, cn?.className.orEmpty())
             snapshots = list
+            collapsedNodes.clear()
             ensureBoundsView()          // 绘制层窗口已在 show() 时创建,这里仅兜底
             boundsView?.setSnapshots(list)
             setLayerVisible(boundsLp, boundsView, true)   // 显示绘制层
@@ -480,7 +623,7 @@ class OverlayDebugWindow(private val service: AccessibilityService) {
         if (boundsView != null) return
         val bv = BoundsOverlayView(service)
         bv.onNodeHit = { index ->
-            ensureInfoCard(lastAppName)  // 卡片被 ✕ 隐藏后点边框重新显示
+            ensureInfoCard(headerTitle, headerActivity)  // 卡片被 ✕ 隐藏后点边框重新显示
             select(index)
         }
         boundsView = bv
@@ -490,12 +633,12 @@ class OverlayDebugWindow(private val service: AccessibilityService) {
     }
 
     /** 创建节点信息卡片(标题栏 + 属性表格 + 方向按钮),置于绘制层之上 */
-    private fun ensureInfoCard(appName: String) {
+    private fun ensureInfoCard(appName: String, activityName: String) {
         if (cardView != null) return
 
         // 头部:应用名(左,加粗) + 节点计数徽章(胶囊) + 关闭钮(右)
         val title = TextView(service).apply {
-            text = appName.substringBefore('(').ifEmpty { appName }
+            text = appName
             setTextColor(Color.WHITE)
             setTextSize(TypedValue.COMPLEX_UNIT_SP, 13f)
             typeface = android.graphics.Typeface.DEFAULT_BOLD
@@ -504,10 +647,10 @@ class OverlayDebugWindow(private val service: AccessibilityService) {
         }
         titleView = title
 
-        // 第二行:Activity 全名(包名/短类名),完整显示(不截断),长按复制
+        // 第二行:完整 Activity 类名,完整显示(不截断),长按复制;没有就收起
         val activity = TextView(service).apply {
-            text = appName.substringAfter('(', "").removeSuffix(")")
-                .ifEmpty { "未知 Activity" }
+            text = activityName
+            visibility = if (activityName.isBlank()) View.GONE else View.VISIBLE
             setTextColor(0x80FFFFFF.toInt())
             setTextSize(TypedValue.COMPLEX_UNIT_SP, 9f)
             typeface = android.graphics.Typeface.MONOSPACE
@@ -715,6 +858,7 @@ class OverlayDebugWindow(private val service: AccessibilityService) {
         treeShown = false
         boundsFromWindowList = false
         snapshots = emptyList()
+        collapsedNodes.clear()
         selectedIndex = -1
     }
 
@@ -726,12 +870,16 @@ class OverlayDebugWindow(private val service: AccessibilityService) {
         selectedIndex = index
         val s = snapshots[index]
         boundsView?.setSelected(index)
-        ensureInfoCard(lastAppName)
+        ensureInfoCard(headerTitle, headerActivity)
         setLayerVisible(cardLp, cardView, true && !treeShown)   // 选中节点即显示卡片;树抽屉展开时保持隐藏
         updateDirButtons(index, s)
         renderInfoTable(index, s)
         // 树抽屉打开时只刷新新旧两行高亮,不整棵重建(全量重建数百行会卡顿)
-        if (treeShown) refreshTreeHighlight(prevSelected, index)
+        if (treeShown) {
+            refreshTreeHighlight(prevSelected, index)
+            // 在屏幕上点中节点后,树里也跟到那一行
+            scrollTreeToSelected()
+        }
     }
 
     /** 只更新两行的高亮背景与文字颜色:遍历可见子 View 匹配,避免整棵树重建 */
@@ -739,21 +887,17 @@ class OverlayDebugWindow(private val service: AccessibilityService) {
         val list = treeListView ?: return
         for (i in 0 until list.childCount) {
             val row = list.getChildAt(i) as? LinearLayout ?: continue
-            // 树行按 DFS 顺序添加,与 snapshots 下标一致:列表第 i 行 = 节点 i
-            when (i) {
-                prev, cur -> {
-                    val isSel = i == cur
-                    row.background = if (isSel) android.graphics.drawable.GradientDrawable().apply {
-                        cornerRadius = dp(6).toFloat()
-                        setColor(0x33F59E0B.toInt())
-                    } else null
-                    // 第二个子 View 是文本行,更新颜色
-                    (row.getChildAt(1) as? TextView)?.setTextColor(
-                        if (isSel) 0xFFF59E0B.toInt()
-                        else if (snapshots[i].clickable) 0xCCFFFFFF.toInt() else 0x99FFFFFF.toInt()
-                    )
-                }
-            }
+            // 按行上挂的快照下标匹配:折叠或略过节点时行数少于节点数,行号不再等于下标
+            val idx = row.tag as? Int ?: continue
+            if (idx != prev && idx != cur) continue
+            val isSel = idx == cur
+            val snap = snapshots.getOrNull(idx)
+            val visible = snap?.visible ?: true
+            // 底带在整行上;可见性走文字颜色,与 treeRow 保持一致
+            row.background = treeRowBackground(isSel)
+            (row.getChildAt(1) as? TextView)?.setTextColor(
+                treeRowTextColor(isSel, visible, snap?.clickable == true)
+            )
         }
     }
 
@@ -1037,6 +1181,8 @@ class OverlayDebugWindow(private val service: AccessibilityService) {
             var best = -1
             var bestArea = Int.MAX_VALUE
             for ((i, s) in list.withIndex()) {
+                // 不可见节点不参与命中:点到空白处不该选中屏幕上没有的节点
+                if (!s.visible) continue
                 val r = s.rect
                 if (r.width() <= 0 || r.height() <= 0) continue
                 if (!r.contains(x, y)) continue
@@ -1057,12 +1203,14 @@ class OverlayDebugWindow(private val service: AccessibilityService) {
             super.onDraw(canvas)
             val list = snapshots ?: return
             for ((i, s) in list.withIndex()) {
+                // 不可见节点不画框:屏幕上没有对应画面,画出来只会干扰
+                if (!s.visible) continue
                 val r = s.rect
                 if (r.width() <= 0 || r.height() <= 0) continue
                 if (i == selected) continue  // 选中框最后画,压在最上层
                 canvas.drawRect(r, if (s.clickable) clickablePaint else normalPaint)
             }
-            if (selected in list.indices) {
+            if (selected in list.indices && list[selected].visible) {
                 val r = list[selected].rect
                 if (r.width() > 0 && r.height() > 0) {
                     canvas.drawRect(r, selectedFill)

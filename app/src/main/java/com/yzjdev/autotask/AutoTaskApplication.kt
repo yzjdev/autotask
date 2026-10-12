@@ -1,6 +1,7 @@
 package com.yzjdev.autotask
 
 import android.app.Application
+import com.yzjdev.autotask.automation.log.AppLog
 import com.yzjdev.autotask.crash.CrashReporter
 
 /**
@@ -18,5 +19,8 @@ class AutoTaskApplication : Application() {
     override fun onCreate() {
         super.onCreate()
         CrashReporter.install(this)
+        // 日志层尽早初始化:回填上次落盘的日志,并裁剪超限文件
+        AppLog.init(this)
+        AppLog.trimIfNeeded()
     }
 }

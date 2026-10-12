@@ -56,7 +56,7 @@ class AutomationManager private constructor(appContext: Context) {
     companion object {
         private val MAIN = Handler(Looper.getMainLooper())
         // manifest 注册的服务是 SelectToSpeakService(系统级服务名,绕过应用检测),
-        // 业务逻辑在其父类 DramaAccessibilityService 中;开关读写必须与之一致
+        // 业务逻辑在其父类 AutoTaskAccessibilityService 中;开关读写必须与之一致
         private const val SERVICE_CLASS =
             "com.google.android.accessibility.selecttospeak.SelectToSpeakService"
 
