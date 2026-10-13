@@ -18,7 +18,7 @@ import kotlinx.coroutines.delay
  *  - 标签:`Button` `TextView`(类名简单名,大小写敏感,写全名也认)
  *  - `#id`:viewId 资源名(`com.pkg:id/btn_ok` 只写 `#btn_ok` 即可)
  *  - `[attr]` `[attr=v]` `[attr*=v]` `[attr^=v]` `[attr$=v]`:
- *    attr ∈ text / desc / package / clickable / enabled / checked / scrollable / selected
+ *    attr ∈ text / desc / package / clickable / enabled / checked / scrollable / selected / visible
  *  - 组合器:后代空格、`>` 直接子级、`+` 紧邻兄弟、`~` 之后兄弟
  *  - 伪类:`:first` `:last` `:eq(n)` `:lt(n)` `:gt(n)` `:checked` `:clickable` `:scrollable`
  *          `:contains(文本)` `:matches(正则)` `:not(选择器)`
@@ -183,6 +183,7 @@ class JsoupNodes(private val service: AutoTaskAccessibilityService) {
             "checked" -> runCatching { node.isChecked }.getOrDefault(false).toString()
             "scrollable" -> runCatching { node.isScrollable }.getOrDefault(false).toString()
             "selected" -> runCatching { node.isSelected }.getOrDefault(false).toString()
+            "visible" -> runCatching { node.isVisibleToUser }.getOrDefault(false).toString()
             else -> null
         }
 
@@ -396,6 +397,8 @@ class JsoupNodes(private val service: AutoTaskAccessibilityService) {
                     else -> Combinator.Descendant
                 }
                 val simple = parseSimpleAt(text, index) ?: return null
+                // 位置没推进说明这一步无法再消费:直接放弃,否则 steps 会无限增长直到 OOM
+                if (simple.second <= index) return null
                 index = simple.second
                 steps.add(Step(if (steps.isEmpty()) Combinator.Descendant else nextCombinator, simple.first))
             }
@@ -416,7 +419,9 @@ class JsoupNodes(private val service: AutoTaskAccessibilityService) {
                 while (index < text.length && (text[index].isLetterOrDigit() || text[index] == '_' || text[index] == '*')) index++
                 if (text.substring(begin, index) != "*") tag = text.substring(begin, index)
             }
-            if (index >= text.length || (!isSelectorChar(text[index]) && text[index] != '[' && text[index] != ':')) {
+            if (index >= text.length ||
+                (!isSelectorChar(text[index]) && text[index] != '#' && text[index] != '[' && text[index] != ':')
+            ) {
                 return Simple(tag, id, attrs, pseudos) to index
             }
 
