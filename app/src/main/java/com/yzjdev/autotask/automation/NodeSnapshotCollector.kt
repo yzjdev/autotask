@@ -42,8 +42,14 @@ internal object NodeSnapshotCollector {
         window: AccessibilityWindowInfo? = null,
     ): List<NodeSnapshot> {
         val out = ArrayList<NodeSnapshot>()
-        val win = window ?: (service as? AutoTaskAccessibilityService)?.focusedWindow()
-        val root = win?.root ?: service.rootInActiveWindow ?: return out
+        // 显式指定窗口(窗口列表点选)时只认该窗口的 root,取不到直接返回空 ——
+        // 不回退 rootInActiveWindow,否则输入法/系统窗口会画成焦点应用窗口,看起来像"拿不到节点"
+        val root = if (window != null) {
+            window.root
+        } else {
+            (service as? AutoTaskAccessibilityService)?.focusedWindow()?.root
+                ?: service.rootInActiveWindow
+        } ?: return out
         // 裁剪起点取屏幕范围:超出屏幕的部分用户看不到
         val dm = service.resources.displayMetrics
         traverse(root, -1, out, Rect(0, 0, dm.widthPixels, dm.heightPixels))

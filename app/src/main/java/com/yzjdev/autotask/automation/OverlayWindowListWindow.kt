@@ -35,17 +35,14 @@ import com.yzjdev.autotask.R
  */
 class OverlayWindowListWindow(
     private val service: AccessibilityService,
-    /** 显隐回调:列表打开时隐藏悬浮球,关闭时恢复(悬浮球由调试悬浮窗持有) */
-    private val onVisibilityChanged: (Boolean) -> Unit = {},
+    /** 点 ✕ 关闭时回调:交给调试悬浮窗的面板状态机统一收起 */
+    private val onClose: () -> Unit = {},
 ) {
 
     companion object {
         private const val DRAG_SLOP_PX = 12        // 拖动 vs 点击的位移阈值
-        private const val REFRESH_DEBOUNCE_MS = 200L  // 前台切换期间的重排去抖
         private const val CARD_W_DP = 300
         private const val CARD_H_DP = 360
-        private const val TAB_W_DP = 26         // 最小化贴边竖条
-        private const val TAB_H_DP = 44
         private const val ACCENT_DIM = 0x4022D3EE.toInt()
         private const val ACCENT_TEXT = 0xFF9AE8F5.toInt()
     }
@@ -59,11 +56,6 @@ class OverlayWindowListWindow(
 
     private var cardView: LinearLayout? = null
     private var listView: LinearLayout? = null
-    private var tabView: ImageView? = null   // 最小化后的贴边标签
-    private var tabOnLeft = false            // 贴边标签当前吸附在左边缘(默认右边缘)
-    private var minimized = false
-    private var showing = false
-    private var listenerRegistered = false
 
     private val lp by lazy {
         WindowManager.LayoutParams(
@@ -78,101 +70,42 @@ class OverlayWindowListWindow(
         }
     }
 
-    /** 最小化贴边标签:竖条,可拖动,松手吸附到最近的左/右边缘 */
-    private val tabLp by lazy {
-        WindowManager.LayoutParams(
-            dp(TAB_W_DP),
-            dp(TAB_H_DP),
-            WindowManager.LayoutParams.TYPE_ACCESSIBILITY_OVERLAY,
-            WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE,
-            PixelFormat.TRANSLUCENT,
-        ).apply {
-            // 与卡片/悬浮球统一用 CENTER:x/y 是相对屏幕中心的偏移,
-            // 贴边位置 = ±(屏宽-标签宽)/2,拖动判定与另两个悬浮窗完全一致
-            gravity = Gravity.CENTER
-            alpha = OVERLAY_ALPHA
-        }
-    }
-
-    private val refreshRunnable = Runnable { render() }
-
-    /** 前台窗口切换:去抖后重排列表,避免切换动画期间反复重建视图 */
-    private val windowListener: () -> Unit = {
-        mainHandler.removeCallbacks(refreshRunnable)
-        mainHandler.postDelayed(refreshRunnable, REFRESH_DEBOUNCE_MS)
-    }
-
     /**
-     * 预加入:提前构建并 addView 卡片窗口(隐藏态 + 触摸穿透)。
-     * 层级由调用方保证 —— 在信息卡片之后、悬浮球之前调用,悬浮球才始终在最上层。
+     * 预加入:构建卡片窗口并加入(隐藏态 + 触摸穿透),同步执行(调用方保证在主线程)。
+     * 只在调试悬浮窗 show() 时与其他层一起调用一次,之后显隐只切 visibility/flags。
      */
     fun prepare() {
-        mainHandler.post { ensureCard() }
+        ensureCard()
     }
 
+    /** 由面板状态机调用:显示列表并重排内容 */
     fun show() {
         mainHandler.post {
             ensureCard()
-            registerWindowListener()
-            setMinimized(false)
+            applyShown()
             render()
-            if (!showing) {
-                showing = true
-                onVisibilityChanged(true)
-            }
         }
     }
 
+    /** 由面板状态机调用:收起列表(仅切显隐,窗口保留) */
     fun hide() {
-        mainHandler.post {
-            mainHandler.removeCallbacks(refreshRunnable)
-            unregisterWindowListener()
-            a11yService?.hideWindowBounds()
-            removeTab()
-            minimized = false
-            applyHidden()
-            if (showing) {
-                showing = false
-                onVisibilityChanged(false)
-            }
-        }
+        mainHandler.post { applyHidden() }
     }
 
     /** 彻底移除窗口:服务解绑/销毁时调用,释放已预加入的卡片 */
     fun release() {
         mainHandler.post {
-            mainHandler.removeCallbacks(refreshRunnable)
-            unregisterWindowListener()
-            a11yService?.hideWindowBounds()
-            removeTab()
             cardView?.let { try { wm.removeView(it) } catch (_: Exception) {} }
             cardView = null
             listView = null
-            minimized = false
-            showing = false
         }
     }
-
-    val isShowing: Boolean
-        get() = showing
 
     /** 构建并加入卡片窗口(仅一次);预加入与首次显示都走这里 */
     private fun ensureCard() {
         if (cardView != null) return
         buildCard()
         applyHidden()
-    }
-
-    private fun registerWindowListener() {
-        if (listenerRegistered) return
-        (service as? AutoTaskAccessibilityService)?.addWindowListener(windowListener)
-        listenerRegistered = true
-    }
-
-    private fun unregisterWindowListener() {
-        if (!listenerRegistered) return
-        (service as? AutoTaskAccessibilityService)?.removeWindowListener(windowListener)
-        listenerRegistered = false
     }
 
     /** 隐藏态:内容 GONE + FLAG_NOT_TOUCHABLE(卡片窗口即使内容 GONE 仍会拦截触摸) */
@@ -183,125 +116,12 @@ class OverlayWindowListWindow(
         try { wm.updateViewLayout(card, lp) } catch (_: Exception) {}
     }
 
-    // ---- 最小化(贴边) ----
-
-    /** 最小化:卡片隐藏并置 NOT_TOUCHABLE,右边缘显示可点击的竖条标签 */
-    private fun minimize() {
-        if (cardView == null || minimized) return
-        setMinimized(true)
-    }
-
-    /** 点贴边标签恢复卡片:同时关闭点选窗口时绘制的节点边界 */
-    private fun restore() {
-        if (!minimized) return
-        a11yService?.hideWindowBounds()
-        setMinimized(false)
-    }
-
-    private fun setMinimized(min: Boolean) {
+    /** 显示态:与 [applyHidden] 对应,切回 VISIBLE 并去掉触摸穿透 */
+    private fun applyShown() {
         val card = cardView ?: return
-        minimized = min
-        // 卡片窗口即使内容 GONE 仍会拦截触摸,必须同步 FLAG_NOT_TOUCHABLE 才能穿透
-        card.visibility = if (min) View.GONE else View.VISIBLE
-        lp.flags = if (min) {
-            lp.flags or WindowManager.LayoutParams.FLAG_NOT_TOUCHABLE
-        } else {
-            lp.flags and WindowManager.LayoutParams.FLAG_NOT_TOUCHABLE.inv()
-        }
+        card.visibility = View.VISIBLE
+        lp.flags = lp.flags and WindowManager.LayoutParams.FLAG_NOT_TOUCHABLE.inv()
         try { wm.updateViewLayout(card, lp) } catch (_: Exception) {}
-        if (min) showTab() else removeTab()
-    }
-
-    /**
-     * 贴边标签:竖条,垂直位置与卡片对齐,横向沿用上次吸附的一侧;
-     * 可拖动,松手自动吸附到最近的左/右边缘
-     */
-    private fun showTab() {
-        if (tabView != null) return
-        val tab = ImageView(service).apply {
-            setImageResource(R.drawable.ic_overlay_list)
-            setColorFilter(ACCENT_TEXT)
-            scaleType = ImageView.ScaleType.CENTER_INSIDE
-            setPadding(dp(6), dp(6), dp(6), dp(6))
-            background = GradientDrawable().apply {
-                shape = GradientDrawable.RECTANGLE
-                cornerRadius = dp(12).toFloat()
-                setColor(0xE60A1418.toInt())
-                setStroke(dp(1), ACCENT_DIM)
-            }
-            setOnClickListener { restore() }
-        }
-        tabLp.x = edgeX(tabOnLeft)
-        tabLp.y = clamp(lp.y, -(screenH - dp(TAB_H_DP)) / 2, (screenH - dp(TAB_H_DP)) / 2)
-        attachTabDrag(tab)
-        tabView = tab
-        try { wm.addView(tab, tabLp) } catch (_: Exception) { tabView = null }
-    }
-
-    private fun removeTab() {
-        tabView?.let { try { wm.removeView(it) } catch (_: Exception) {} }
-        tabView = null
-    }
-
-    /** 贴左/右边缘时的 x 偏移(gravity=CENTER,x 为相对屏幕中心的偏移) */
-    private fun edgeX(left: Boolean): Int {
-        val half = (screenW - dp(TAB_W_DP)) / 2
-        return if (left) -half else half
-    }
-
-    /**
-     * 贴边标签手势:与卡片/悬浮球同一套判定 —— 按下不消费(最终是点击时交给 onClick 恢复卡片),
-     * 位移超过 [DRAG_SLOP_PX] 判定为拖动并跟手,可拖到屏幕任意位置;
-     * 松手才按标签中心落在哪一半吸附到最近的左/右边缘。
-     */
-    @SuppressLint("ClickableViewAccessibility")
-    private fun attachTabDrag(tab: ImageView) {
-        var downX = 0f
-        var downY = 0f
-        var startX = 0
-        var startY = 0
-        var dragging = false
-        tab.setOnTouchListener { v, e ->
-            when (e.actionMasked) {
-                MotionEvent.ACTION_DOWN -> {
-                    downX = e.rawX; downY = e.rawY
-                    startX = tabLp.x; startY = tabLp.y
-                    dragging = false
-                    // 不消费:若最终是点击,让 onClick 正常触发
-                    false
-                }
-                MotionEvent.ACTION_MOVE -> {
-                    val dx = e.rawX - downX
-                    val dy = e.rawY - downY
-                    if (dragging || dx * dx + dy * dy > DRAG_SLOP_PX * DRAG_SLOP_PX) {
-                        dragging = true
-                        // gravity=CENTER 时 x/y 为相对屏幕中心的偏移,clamp 到半屏范围
-                        tabLp.x = clamp(startX + dx.toInt(),
-                            -(screenW - v.width) / 2, (screenW - v.width) / 2)
-                        tabLp.y = clamp(startY + dy.toInt(),
-                            -(screenH - v.height) / 2, (screenH - v.height) / 2)
-                        wm.updateViewLayout(v, tabLp)
-                    }
-                    dragging
-                }
-                MotionEvent.ACTION_UP, MotionEvent.ACTION_CANCEL -> {
-                    val wasDragging = dragging
-                    dragging = false
-                    // 只在拖动结束后吸附;未拖动则放行给 onClick 恢复卡片
-                    if (wasDragging) snapTabToEdge(tab)
-                    wasDragging
-                }
-                else -> dragging
-            }
-        }
-    }
-
-    /** 松手吸附:按标签中心落在屏幕哪一半,贴到最近的左/右边缘 */
-    private fun snapTabToEdge(tab: ImageView) {
-        // gravity=CENTER 时标签中心 = 屏宽/2 + x
-        tabOnLeft = screenW / 2 + tabLp.x < screenW / 2
-        tabLp.x = edgeX(tabOnLeft)
-        wm.updateViewLayout(tab, tabLp)
     }
 
     // ---- UI 构建 ----
@@ -321,9 +141,8 @@ class OverlayWindowListWindow(
             gravity = Gravity.CENTER_VERTICAL
             setPadding(dp(12), dp(10), dp(12), dp(8))
             addView(title, LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f))
-            addView(iconButton(R.drawable.ic_overlay_minimize) { minimize() })
             addView(iconButton(R.drawable.ic_overlay_refresh) { render() })
-            addView(iconButton(R.drawable.ic_overlay_close) { hide() })
+            addView(iconButton(R.drawable.ic_overlay_close) { onClose() })
         }
 
         val list = LinearLayout(service).apply {
@@ -374,15 +193,18 @@ class OverlayWindowListWindow(
 
     // ---- 列表渲染 ----
 
-    /** 重新枚举窗口并按层级顺序重建列表:一行一个窗口(含本应用自身的窗口) */
+    /** 重新枚举窗口并按层级顺序重建列表:一行一个窗口(已过滤本应用自身的窗口) */
     private fun render() {
         val container = listView ?: return
         container.removeAllViews()
 
-        // 含本应用窗口(悬浮球、节点卡片、本卡片、一像素层):需要对照自身层级时不必另开入口。
+        // 过滤本应用自身的窗口(悬浮球、节点卡片、本卡片、一像素层)。
         // getWindows() 只返回默认显示器的窗口,系统小窗/自由窗口在部分 ROM 上跑在虚拟显示器,
         // 整个会漏掉;故合并全部显示器的窗口,显示器编号直接并入行内文本
-        val windows = windowEntries()
+        val selfPkg = service.packageName
+        val windows = windowEntries().filter { (_, w) ->
+            runCatching { w.root?.packageName?.toString() }.getOrNull() != selfPkg
+        }
         if (windows.isEmpty()) {
             container.addView(hint("未获取到窗口\n请确认无障碍服务已连接"))
             return
@@ -453,9 +275,13 @@ class OverlayWindowListWindow(
             orientation = LinearLayout.VERTICAL
             setPadding(dp(8), dp(6), dp(8), dp(6))
             isClickable = true
-            // 点击:绘制该窗口节点边界,卡片自动最小化贴边(点贴边标签恢复时关闭绘制)
+            // 点击:绘制该窗口节点边界;读不到节点时给出提示(窗口已被系统重建且匹配失败等)
             setOnClickListener {
-                if (a11yService?.showWindowBounds(w) == true) minimize()
+                if (a11yService?.showWindowBounds(w) != true) {
+                    android.widget.Toast.makeText(
+                        service, "无法读取该窗口的节点内容", android.widget.Toast.LENGTH_SHORT,
+                    ).show()
+                }
             }
             // 长按:复制完整信息
             setOnLongClickListener {

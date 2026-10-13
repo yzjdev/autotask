@@ -22,8 +22,10 @@ import android.widget.HorizontalScrollView
 import android.widget.LinearLayout
 import android.widget.ScrollView
 import android.widget.TextView
+import com.yzjdev.autotask.automation.log.AppLog
+import com.yzjdev.autotask.automation.log.LogSource
 
-/** 悬浮窗整体不透明度:调试卡片、节点树抽屉与窗口列表共用同一值(越大越不透明) */
+/** 悬浮窗整体不透明度:调试卡片与节点树抽屉共用同一值(越大越不透明) */
 internal const val OVERLAY_ALPHA = 0.92f
 
 /**
@@ -46,11 +48,11 @@ class OverlayDebugWindow(private val service: AccessibilityService) {
     private val wm by lazy { service.getSystemService(WindowManager::class.java) }
     private val mainHandler = Handler(Looper.getMainLooper())
 
-    // 开关悬浮球:独立 UI,单击绘制/收起焦点激活窗口的节点边界,长按唤起窗口列表
+    // 开关悬浮球:独立 UI,单击绘制/收起焦点激活窗口的节点边界,长按关闭悬浮窗
     private val toggleWindow = OverlayToggleWindow(
         service,
-        { toggleCapture() },
-        { (service as? AutoTaskAccessibilityService)?.showWindowListOverlay() },
+        { togglePanel() },
+        { (service as? AutoTaskAccessibilityService)?.showDebugOverlay(false) },
     )
 
     private var cardView: LinearLayout? = null
@@ -113,11 +115,6 @@ class OverlayDebugWindow(private val service: AccessibilityService) {
         }
     }
 
-    /** 节点信息抓取开关状态 */
-    @Volatile
-    var captureEnabled = false
-        private set
-
     /** 抓取时的节点快照(节点树会失效,必须立即转为数据) */
     private var snapshots: List<NodeSnapshot> = emptyList()
     private var selectedIndex = -1
@@ -131,36 +128,6 @@ class OverlayDebugWindow(private val service: AccessibilityService) {
 
     /** 头部当前窗口的包名:标题里那份是「应用名(包名)」,长按要复制的是纯包名 */
     private var headerPkg = ""
-
-    /** 头部是否锁定在窗口列表点选的窗口上:锁定时不再跟随焦点激活窗口刷新 */
-    private var headerPinned = false
-
-    /** 本次抓取的窗口根包名:标题只接受与之一致的 Activity 来源,防桌面/系统窗口污染 */
-    @Volatile
-    private var capturePkg: String? = null
-
-    /** 绘制层是否由窗口列表点选触发:窗口列表恢复时自动关闭(调试抓取自身开启时不介入) */
-    private var boundsFromWindowList = false
-
-    /**
-     * 跟随前台窗口变化:每次窗口切换都从「焦点激活窗口」重新解析 Activity(服务侧 currentActivity),
-     * 无需用户重新抓取节点。只跟随与当前抓取窗口同包名的结果;桌面/Launcher 是合法 Activity,
-     * 但若当前抓的不是桌面,不能让标题跳回桌面。
-     */
-    private val windowListener: () -> Unit = {
-        mainHandler.post {
-            // 头部锁定在窗口列表点选的窗口时,不跟随焦点窗口改写
-            if (headerPinned) return@post
-            val svc = service as? com.yzjdev.autotask.automation.AutoTaskAccessibilityService
-                ?: return@post
-            val cn = svc.currentActivity() ?: return@post
-            val pkg = cn.packageName ?: return@post
-            if (capturePkg == null || pkg == capturePkg) {
-                val kind = svc.focusedWindow()?.let { svc.windowKind(it) }
-                applyHeader(headerName(kind, pkg), pkg, cn.className)
-            }
-        }
-    }
 
     /** 头部第一行的名字:通知栏/导航栏/桌面用类别名,其余用应用名 */
     private fun headerName(kind: WindowKind?, pkg: String): String = when (kind) {
@@ -188,23 +155,23 @@ class OverlayDebugWindow(private val service: AccessibilityService) {
     // ---- 控制面板(开关悬浮球,独立 UI)----
 
     /**
-     * 开启开关:依次添加四个窗口(绘制层 → 信息卡片 → 窗口列表 → 悬浮球),
+     * 开启开关:一次性按序创建四个窗口(绘制层 → 信息卡片 → 窗口列表 → 悬浮球),
      * 同层级窗口按添加顺序叠放,后加的在上:绘制层在底,悬浮球在最上。
-     * 卡片与绘制层初始 GONE,后续只切 visibility,不再动态 addView/removeView,
+     * 各窗口初始 GONE/隐藏态,后续只切 visibility,不再动态 addView/removeView,
      * 避免抓取/选中时窗口反复重建导致的闪烁与层级跳动。
+     *
+     * 四窗口的显隐不由各自入口零散控制,统一收口到 [PanelState] 状态机(见 [applyState]):
+     * 三块面板同一时刻只显示一种组合,悬浮球全程常显。
      */
     fun show() {
         mainHandler.post {
             ensureBoundsView()
-            boundsView?.visibility = View.GONE
             ensureInfoCard(headerTitle, headerActivity)
-            cardView?.visibility = View.GONE
-            // 窗口列表提前加入(隐藏态):层级落在信息卡之后、悬浮球之前
-            (service as? com.yzjdev.autotask.automation.AutoTaskAccessibilityService)
-                ?.prepareWindowListOverlay()
-            // 订阅前台窗口切换,标题实时跟随(悬浮窗显示期间)
-            (service as? com.yzjdev.autotask.automation.AutoTaskAccessibilityService)
-                ?.addWindowListener(windowListener)
+            // 窗口列表悬浮窗预加入在信息卡之后、悬浮球之前,保证层级:绘制层 < 卡片 < 列表 < 悬浮球
+            (service as? AutoTaskAccessibilityService)?.prepareWindowListOverlay()
+            // 初始态:只有悬浮球,三块面板全隐(显隐与触摸穿透标志一并由状态机置好)
+            panelState = PanelState.None
+            applyState()
             // 悬浮球最后创建并置顶,天然位于最上层
             toggleWindow.show()
             toggleWindow.bringToFront()
@@ -214,12 +181,10 @@ class OverlayDebugWindow(private val service: AccessibilityService) {
 
     fun hide() {
         mainHandler.post {
-            (service as? com.yzjdev.autotask.automation.AutoTaskAccessibilityService)
-                ?.removeWindowListener(windowListener)
             AutoTaskAccessibilityService.notifyOverlayShowing(false)
+            panelState = PanelState.None
             removeCaptureViews()
             toggleWindow.hide()
-            captureEnabled = false
             toggleWindow.setActive(false)
         }
     }
@@ -227,36 +192,85 @@ class OverlayDebugWindow(private val service: AccessibilityService) {
     val isShowing: Boolean
         get() = toggleWindow.isShowing
 
-    /** 窗口列表打开期间隐藏悬浮球,关闭后恢复;恢复时重新置顶 */
-    fun setBallVisible(visible: Boolean) {
-        mainHandler.post {
-            if (visible) {
-                toggleWindow.show()
-                toggleWindow.bringToFront()
-            } else {
-                toggleWindow.hide()
-            }
-        }
-    }
-
-    // ---- 窗口列表点选:只画指定窗口的节点边界 ----
+    // ---- 面板状态机 ----
 
     /**
-     * 窗口列表点选某窗口:只绘制该窗口的节点边界(不显示悬浮球与信息卡片)。
-     * 需在主线程调用;返回 false 表示该窗口已失效、取不到节点。
+     * 三块面板的显隐状态:同一时刻只呈现一种组合。
+     * 悬浮球不在状态内 —— 调试悬浮窗开启期间它全程常显,是唯一常驻的入口。
+     *
+     * | 状态    | 窗口列表 | 绘制层 | 信息卡片                 |
+     * |---------|----------|--------|--------------------------|
+     * | `None`  | 隐       | 隐     | 隐                       |
+     * | `List`  | 显       | 隐     | 隐                       |
+     * | `Bounds`| 隐       | 显     | 选中节点时显(节点树展开时隐) |
+     *
+     * 转移表(所有入口只改状态再调 [applyState],不各自 setLayerVisible):
+     *  - 点悬浮球:`None` → `List`;`List`/`Bounds` → `None`
+     *  - 列表点某行窗口:`List` → `Bounds`(画该窗口,列表让位)
+     *  - 列表 ✕:`List` → `None`
+     *  - 点绘制层:`Bounds` 内实时重抓刷新(列表点选的窗口,不落回激活窗口)
+     *  - 点中节点:`Bounds` 内显示信息卡片;卡片 ✕ 只收卡片,绘制层保留
+     */
+    private enum class PanelState { None, List, Bounds }
+
+    private var panelState = PanelState.None
+
+    /** 窗口列表点选的来源窗口:点击绘制层实时刷新时重抓它,而不是落回焦点激活窗口 */
+    private var boundsWindow: android.view.accessibility.AccessibilityWindowInfo? = null
+
+    /**
+     * 唯一显隐收口:按 [panelState] 与选中状态推导四块面板的显隐。
+     * 入口只改状态再调这里 —— 否则状态与画面容易不一致(残留上次的绘制/卡片)。
+     */
+    private fun applyState() {
+        val bounds = panelState == PanelState.Bounds
+        if (!bounds) {
+            // 离开 Bounds:清空绘制数据,下次进来从干净状态开始
+            boundsView?.setSelected(-1)
+            snapshots = emptyList()
+            collapsedNodes.clear()
+            selectedIndex = -1
+            boundsWindow = null
+            treeShown = false
+        }
+        val card = bounds && selectedIndex >= 0 && !treeShown
+        setLayerVisible(boundsLp, boundsView, bounds)
+        setLayerVisible(cardLp, cardView, card)
+        setLayerVisible(treeLp, treeDrawer, bounds && treeShown)
+        // 窗口列表是服务侧持有的独立窗口,同样由这里统一驱动
+        (service as? AutoTaskAccessibilityService)?.setWindowListVisible(panelState == PanelState.List)
+    }
+
+    /** 点悬浮球:未展开 → 打开窗口列表;已展开 → 全部收起 */
+    private fun togglePanel() {
+        panelState = if (panelState == PanelState.None) PanelState.List else PanelState.None
+        applyState()
+    }
+
+    /** 列表 ✕:收起列表,回到只剩悬浮球 */
+    fun closeWindowList() {
+        panelState = PanelState.None
+        applyState()
+    }
+
+    /**
+     * 窗口列表点选某窗口:进入 `Bounds` 状态,画该窗口的节点边界,头部取该窗口自己的 Activity。
+     * 这是 `Bounds` 的唯一入口 —— 抓取的窗口在此确定,后续点击绘制层重抓的都是它。
      */
     fun showBoundsFor(window: android.view.accessibility.AccessibilityWindowInfo): Boolean {
         val list = NodeSnapshotCollector.collect(service, window)
-        if (list.isEmpty()) return false
-        snapshots = list
-        collapsedNodes.clear()
-        selectedIndex = -1
-        boundsFromWindowList = true
+        if (list.isEmpty()) {
+            // 诊断:root 取不到 = 窗口引用已失效(系统重建了该窗口);root 可取但为空 = 子树不可读
+            val rootOk = runCatching { window.root }.getOrNull() != null
+            AppLog.warn(
+                LogSource.Overlay,
+                "窗口 ${window.id} 节点读取失败(root=${if (rootOk) "可取但子树为空" else "null"})",
+            )
+            return false
+        }
         val pkg = runCatching { window.root?.packageName?.toString() }.getOrNull().orEmpty()
-        val svc = service as? com.yzjdev.autotask.automation.AutoTaskAccessibilityService
-        // 头部取该窗口自己的 Activity(不是焦点窗口的),并锁定,避免随后被焦点窗口改写
+        val svc = service as? AutoTaskAccessibilityService
         val cn = svc?.activityOfWindow(window)
-        headerPinned = true
         if (pkg.isEmpty()) {
             applyHeader("窗口 ${window.id}", "", "")
         } else {
@@ -266,49 +280,17 @@ class OverlayDebugWindow(private val service: AccessibilityService) {
                 cn?.className.orEmpty(),
             )
         }
-        ensureBoundsView()
-        boundsView?.setSnapshots(list)                  // 内含清空上次命中的高亮
-        setLayerVisible(boundsLp, boundsView, true)
-        setLayerVisible(cardLp, cardView, false)
-        hideTreeDrawer()
-        return true
-    }
-
-    /** 关闭窗口列表触发的绘制层(连同信息卡片与节点树);调试抓取自身开启时不介入 */
-    fun hideBounds() {
-        if (!boundsFromWindowList) return
-        boundsFromWindowList = false
-        hideCaptureLayers()
-    }
-
-    // ---- 抓取 ----
-
-    /**
-     * 点击悬浮球:切换节点边界绘制层的显隐。
-     * 开启 → 抓取节点树并显示绘制层(信息卡片保持隐藏,点击节点才显示);
-     * 关闭 → 隐藏绘制层与信息卡片。窗口常驻,只切 visibility,不重建窗口。
-     */
-    private fun toggleCapture() {
-        captureEnabled = !captureEnabled
-        toggleWindow.setActive(captureEnabled)
-        if (captureEnabled) {
-            boundsFromWindowList = false   // 调试抓取接管绘制层
-            captureAndShow()
-        } else {
-            hideCaptureLayers()
-        }
-    }
-
-    /** 隐藏绘制层与信息卡片(窗口保留,置 GONE + NOT_TOUCHABLE,事件穿透) */
-    private fun hideCaptureLayers() {
-        setLayerVisible(cardLp, cardView, false)
-        setLayerVisible(boundsLp, boundsView, false)
-        hideTreeDrawer()
-        // 关闭绘制层:清空上次命中的高亮,下次抓取从干净状态开始
-        boundsView?.setSelected(-1)
-        snapshots = emptyList()
+        boundsWindow = window
+        snapshots = list
         collapsedNodes.clear()
+        // 刚进来不预选节点:只画框,点中哪个才弹哪张卡片
         selectedIndex = -1
+        treeShown = false
+        ensureBoundsView()
+        boundsView?.setSnapshots(list)   // 内含清空上次命中的高亮
+        panelState = PanelState.Bounds
+        applyState()
+        return true
     }
 
     /**
@@ -326,30 +308,26 @@ class OverlayDebugWindow(private val service: AccessibilityService) {
         try { wm.updateViewLayout(view, lp) } catch (_: Exception) {}
     }
 
-    /** 仅隐藏节点信息卡片;边框绘制保留,可继续点击边框查看节点 */
+    /** 信息卡 ✕:只收信息卡(取消选中),绘制层保留,可继续点边框查看节点 */
     private fun closeInfoCard() {
-        setLayerVisible(cardLp, cardView, false)
-        hideTreeDrawer()
         boundsView?.setSelected(-1)
+        selectedIndex = -1
+        treeShown = false
+        applyState()
     }
 
     // ---- 节点树抽屉 ----
 
-    /** 抽屉显隐切换:展开时隐藏节点信息卡片(互不遮挡),收起时恢复 */
+    /** 抽屉显隐切换:展开时隐藏信息卡(互不遮挡),收起时恢复 */
     private fun toggleTreeDrawer() {
+        treeShown = !treeShown
         if (treeShown) {
-            hideTreeDrawer()
-            // 收起抽屉后恢复信息卡片(仅当仍有选中节点)
-            if (selectedIndex >= 0) setLayerVisible(cardLp, cardView, true)
-        } else {
             ensureTreeDrawer()
             renderTreeView()
-            setLayerVisible(treeLp, treeDrawer, true)
-            setLayerVisible(cardLp, cardView, false)  // 抽屉展开时隐藏节点信息卡片
-            treeShown = true
             toggleWindow.bringToFront()
-            scrollTreeToSelected()
         }
+        applyState()               // 信息卡与抽屉的互斥关系在 applyState 里统一处理
+        if (treeShown) scrollTreeToSelected()
     }
 
     /**
@@ -380,9 +358,10 @@ class OverlayDebugWindow(private val service: AccessibilityService) {
         }
     }
 
+    /** 收起抽屉:信息卡是否随之恢复由 [applyState] 按「是否仍有选中节点」决定 */
     private fun hideTreeDrawer() {
-        setLayerVisible(treeLp, treeDrawer, false)
         treeShown = false
+        applyState()
     }
 
     /** 创建抽屉窗口:标题栏(节点数 + 收起钮) + 树形列表 ScrollView */
@@ -495,10 +474,6 @@ class OverlayDebugWindow(private val service: AccessibilityService) {
                     }
                     return true
                 }
-                // 长按树行:生成该节点的 jsoup 选择器并写入剪贴板
-                override fun onLongPress(e: MotionEvent) {
-                    if (treeTapIndex >= 0) copySelectorOf(treeTapIndex)
-                }
             })
     }
 
@@ -587,42 +562,6 @@ class OverlayDebugWindow(private val service: AccessibilityService) {
         return row
     }
 
-    /** 抓取当前窗口节点树:绘制边界框 + 选中根节点 */
-    private fun captureAndShow() {
-        try {
-            val list = NodeSnapshotCollector.collect(service)
-            // 抓取瞬间 rootInActiveWindow.packageName 可能已指向桌面/系统窗口;
-            // 无 Shizuku 校验,改用「焦点应用窗口」做基准(更接近真实前台)
-            val anchor = service.windows.firstOrNull {
-                it.isFocused && it.type == android.view.accessibility.AccessibilityWindowInfo.TYPE_APPLICATION
-            }?.root ?: service.rootInActiveWindow
-            val root = anchor ?: run {
-                snapshots = emptyList()
-                collapsedNodes.clear()
-                selectedIndex = -1
-                return
-            }
-            val appId = root.packageName?.toString() ?: "Unknown"
-            // appId 以无障碍根节点包名为准,标题与 Activity 都取「焦点激活窗口」的解析结果
-            capturePkg = appId
-            // 抓取接管头部:解除窗口列表点选时的锁定
-            headerPinned = false
-            val svc = service as? com.yzjdev.autotask.automation.AutoTaskAccessibilityService
-            val cn = svc?.currentActivity()?.takeIf { it.packageName == appId }
-            val kind = svc?.focusedWindow()?.let { svc.windowKind(it) }
-            applyHeader(headerName(kind, appId), appId, cn?.className.orEmpty())
-            snapshots = list
-            collapsedNodes.clear()
-            ensureBoundsView()          // 绘制层窗口已在 show() 时创建,这里仅兜底
-            boundsView?.setSnapshots(list)
-            setLayerVisible(boundsLp, boundsView, true)   // 显示绘制层
-            setLayerVisible(cardLp, cardView, false)      // 信息卡片保持隐藏
-            selectedIndex = 0           // 根节点仅在内部选中,不弹卡片
-        } catch (_: Exception) {
-            // 窗口可能已被系统回收,静默忽略
-        }
-    }
-
     /**
      * 创建绘制层(边界框)。三个窗口在 show() 时已按 球→卡片→绘制层 顺序创建,
      * 层级固定:绘制层在底层,信息卡片、悬浮球依次叠加其上;这里仅兜底创建。
@@ -630,6 +569,12 @@ class OverlayDebugWindow(private val service: AccessibilityService) {
     private fun ensureBoundsView() {
         if (boundsView != null) return
         val bv = BoundsOverlayView(service)
+        bv.onTap = { _, _ ->
+            // 点击绘制层:重抓当前正在画的这个窗口(服务端会按 id/类型匹配最新实例)。
+            // 不落回焦点激活窗口 —— 否则点输入法等非焦点窗口会被激活窗口覆盖。
+            val svc = service as? AutoTaskAccessibilityService
+            boundsWindow?.let { svc?.showWindowBounds(it) }
+        }
         bv.onNodeHit = { index ->
             ensureInfoCard(headerTitle, headerActivity)  // 卡片被 ✕ 隐藏后点边框重新显示
             select(index)
@@ -859,6 +804,7 @@ class OverlayDebugWindow(private val service: AccessibilityService) {
     private fun removeCaptureViews() {
         boundsView?.let {
             it.onNodeHit = null
+            it.onTap = null
             try { wm.removeView(it) } catch (_: Exception) {}
         }
         boundsView = null
@@ -876,7 +822,6 @@ class OverlayDebugWindow(private val service: AccessibilityService) {
         treeListView = null
         treeScroll = null
         treeShown = false
-        boundsFromWindowList = false
         snapshots = emptyList()
         collapsedNodes.clear()
         selectedIndex = -1
@@ -891,7 +836,7 @@ class OverlayDebugWindow(private val service: AccessibilityService) {
         val s = snapshots[index]
         boundsView?.setSelected(index)
         ensureInfoCard(headerTitle, headerActivity)
-        setLayerVisible(cardLp, cardView, true && !treeShown)   // 选中节点即显示卡片;树抽屉展开时保持隐藏
+        applyState()   // 选中节点即显示卡片;树抽屉展开时保持隐藏,由状态机统一决定
         updateDirButtons(index, s)
         renderInfoTable(index, s)
         // 树抽屉打开时只刷新新旧两行高亮,不整棵重建(全量重建数百行会卡顿)
@@ -978,12 +923,6 @@ class OverlayDebugWindow(private val service: AccessibilityService) {
                 shape = android.graphics.drawable.GradientDrawable.RECTANGLE
                 cornerRadius = dp(4).toFloat()
                 setColor(0x33F59E0B.toInt())
-            }
-            // 长按:生成 jsoup 选择器并写入剪贴板(属性行的长按复制属性值,不冲突)
-            isLongClickable = true
-            setOnLongClickListener {
-                copySelectorOf(index)
-                true
             }
         })
         top.addView(TextView(service).apply {
@@ -1121,18 +1060,6 @@ class OverlayDebugWindow(private val service: AccessibilityService) {
         android.widget.Toast.makeText(service, text, android.widget.Toast.LENGTH_SHORT).show()
     }
 
-    /** 长按节点(树行/信息卡片):生成 jsoup 选择器并写入剪贴板 */
-    private fun copySelectorOf(index: Int) {
-        val node = snapshots.getOrNull(index)?.node ?: return
-        val selector = JsrSelectorBuilder.build(node)
-        if (selector.isNullOrBlank()) {
-            android.widget.Toast.makeText(service, "该节点已失效,重新抓取后再试",
-                android.widget.Toast.LENGTH_SHORT).show()
-            return
-        }
-        copyToClipboard(selector)
-    }
-
     /** 上:父节点 */
     private fun moveUp() {
         snapshots.getOrNull(selectedIndex)?.parent?.let { select(it) }
@@ -1168,6 +1095,9 @@ class OverlayDebugWindow(private val service: AccessibilityService) {
 
         /** 命中节点时回调(由外部注入,避免持有外部引用导致泄漏) */
         var onNodeHit: ((Int) -> Unit)? = null
+
+        /** 点击绘制层时回调(触点坐标):宿主先实时抓取最新快照,再做命中 */
+        var onTap: ((Int, Int) -> Unit)? = null
 
         private var snapshots: List<NodeSnapshot>? = null
         private var selected = -1
@@ -1212,10 +1142,12 @@ class OverlayDebugWindow(private val service: AccessibilityService) {
          * 返回 true 表示消费了事件。
          */
         override fun onTouchEvent(event: MotionEvent): Boolean {
-            val list = snapshots ?: return false
             if (event.actionMasked != MotionEvent.ACTION_DOWN) return false
             val x = event.x.toInt()
             val y = event.y.toInt()
+            // 点击时实时抓取:快照不跟随事件回调刷新,落点之前先拿最新节点树
+            onTap?.invoke(x, y)
+            val list = snapshots ?: return false
             var best = -1
             var bestArea = Int.MAX_VALUE
             for ((i, s) in list.withIndex()) {

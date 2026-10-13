@@ -20,7 +20,7 @@ import android.widget.TextView
  *
  *  - 显示十字准星(未开启)/ 叉号(抓取中)两种状态图标
  *  - 可整屏拖动(带拖动 vs 点击的位移阈值判定)
- *  - 点击触发 [onToggle] 回调,长按触发 [onLongPress] 回调
+ *  - 点击触发 [onToggle] 回调,长按触发 [onLongPress] 回调(关闭悬浮窗)
  *  - 开关状态由持有方维护,通过 [setActive] 回填图标
  *  - TYPE_ACCESSIBILITY_OVERLAY:无需悬浮窗权限
  */

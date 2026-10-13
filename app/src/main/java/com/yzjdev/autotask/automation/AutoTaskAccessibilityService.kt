@@ -3,18 +3,15 @@ package com.yzjdev.autotask.automation
 import android.accessibilityservice.AccessibilityService
 import android.accessibilityservice.GestureDescription
 import android.content.ComponentName
-import android.content.pm.ActivityInfo
 import android.content.Intent
 import android.graphics.Path
 import android.graphics.PixelFormat
 import android.os.Handler
 import android.os.Looper
-import android.os.SystemClock
+import android.util.Log
 import android.view.Gravity
 import android.view.View
 import android.view.WindowManager
-import android.provider.Settings
-import android.util.Log
 import android.view.accessibility.AccessibilityEvent
 import android.view.accessibility.AccessibilityNodeInfo
 import android.view.accessibility.AccessibilityWindowInfo
@@ -22,7 +19,6 @@ import java.util.HashSet
 import java.util.concurrent.CopyOnWriteArrayList
 import com.yzjdev.autotask.automation.log.AppLog
 import com.yzjdev.autotask.automation.log.LogSource
-import com.yzjdev.autotask.jsr.JsoupNodes
 
 /**
  * 窗口类别:在无障碍的窗口类型之上再细分 ——
@@ -61,47 +57,6 @@ open class AutoTaskAccessibilityService : AccessibilityService() {
 
         /** 节点树打印的 logcat 标签 */
         private const val TAG = "AutoTaskTree"
-
-        /** 滚动调试日志的防抖窗口(毫秒):密集滚动事件一个窗口内只打一条 */
-        private const val SCROLL_LOG_DEBOUNCE_MS = 500L
-
-        /**
-         * 无障碍事件类型数值 → 常量名。
-         *
-         * 给 [onAccessibilityEvent] 里 `event.eventType` 的调试输出用:单看数字认不出事件,
-         * 配上名称才能一眼分辨。未知取值返回 `UNKNOWN(0x…)`,不返回空串。
-         */
-        fun eventTypeToString(eventType: Int): String = when (eventType) {
-            AccessibilityEvent.TYPE_VIEW_CLICKED -> "TYPE_VIEW_CLICKED"
-            AccessibilityEvent.TYPE_VIEW_LONG_CLICKED -> "TYPE_VIEW_LONG_CLICKED"
-            AccessibilityEvent.TYPE_VIEW_SELECTED -> "TYPE_VIEW_SELECTED"
-            AccessibilityEvent.TYPE_VIEW_FOCUSED -> "TYPE_VIEW_FOCUSED"
-            AccessibilityEvent.TYPE_VIEW_TEXT_CHANGED -> "TYPE_VIEW_TEXT_CHANGED"
-            AccessibilityEvent.TYPE_WINDOW_STATE_CHANGED -> "TYPE_WINDOW_STATE_CHANGED"
-            AccessibilityEvent.TYPE_NOTIFICATION_STATE_CHANGED -> "TYPE_NOTIFICATION_STATE_CHANGED"
-            AccessibilityEvent.TYPE_VIEW_HOVER_ENTER -> "TYPE_VIEW_HOVER_ENTER"
-            AccessibilityEvent.TYPE_VIEW_HOVER_EXIT -> "TYPE_VIEW_HOVER_EXIT"
-            AccessibilityEvent.TYPE_TOUCH_EXPLORATION_GESTURE_START -> "TYPE_TOUCH_EXPLORATION_GESTURE_START"
-            AccessibilityEvent.TYPE_TOUCH_EXPLORATION_GESTURE_END -> "TYPE_TOUCH_EXPLORATION_GESTURE_END"
-            AccessibilityEvent.TYPE_WINDOW_CONTENT_CHANGED -> "TYPE_WINDOW_CONTENT_CHANGED"
-            AccessibilityEvent.TYPE_VIEW_SCROLLED -> "TYPE_VIEW_SCROLLED"
-            AccessibilityEvent.TYPE_VIEW_TEXT_SELECTION_CHANGED -> "TYPE_VIEW_TEXT_SELECTION_CHANGED"
-            AccessibilityEvent.TYPE_ANNOUNCEMENT -> "TYPE_ANNOUNCEMENT"
-            AccessibilityEvent.TYPE_VIEW_ACCESSIBILITY_FOCUSED -> "TYPE_VIEW_ACCESSIBILITY_FOCUSED"
-            AccessibilityEvent.TYPE_VIEW_ACCESSIBILITY_FOCUS_CLEARED -> "TYPE_VIEW_ACCESSIBILITY_FOCUS_CLEARED"
-            AccessibilityEvent.TYPE_VIEW_TEXT_TRAVERSED_AT_MOVEMENT_GRANULARITY ->
-                "TYPE_VIEW_TEXT_TRAVERSED_AT_MOVEMENT_GRANULARITY"
-            AccessibilityEvent.TYPE_GESTURE_DETECTION_START -> "TYPE_GESTURE_DETECTION_START"
-            AccessibilityEvent.TYPE_GESTURE_DETECTION_END -> "TYPE_GESTURE_DETECTION_END"
-            AccessibilityEvent.TYPE_TOUCH_INTERACTION_START -> "TYPE_TOUCH_INTERACTION_START"
-            AccessibilityEvent.TYPE_TOUCH_INTERACTION_END -> "TYPE_TOUCH_INTERACTION_END"
-            AccessibilityEvent.TYPE_WINDOWS_CHANGED -> "TYPE_WINDOWS_CHANGED"
-            AccessibilityEvent.TYPE_VIEW_CONTEXT_CLICKED -> "TYPE_VIEW_CONTEXT_CLICKED"
-            AccessibilityEvent.TYPE_ASSIST_READING_CONTEXT -> "TYPE_ASSIST_READING_CONTEXT"
-            AccessibilityEvent.TYPE_SPEECH_STATE_CHANGE -> "TYPE_SPEECH_STATE_CHANGE"
-            AccessibilityEvent.TYPE_VIEW_TARGETED_BY_SCROLL -> "TYPE_VIEW_TARGETED_BY_SCROLL"
-            else -> "UNKNOWN(0x" + Integer.toHexString(eventType) + ")"
-        }
 
         @Volatile
         private var sInstance: AutoTaskAccessibilityService? = null
@@ -151,11 +106,8 @@ open class AutoTaskAccessibilityService : AccessibilityService() {
     // 无障碍调试悬浮窗:由主页开关控制显隐,连接后不自动显示
     private val debugOverlay = OverlayDebugWindow(this)
 
-    // 窗口列表悬浮窗:枚举所有可见窗口并按应用分组,由节点悬浮球长按唤起;
-    // 列表打开期间隐藏悬浮球,关闭后恢复
-    private val windowListOverlay = OverlayWindowListWindow(this) { showing ->
-        debugOverlay.setBallVisible(!showing)
-    }
+    // 窗口列表悬浮窗:由悬浮球点击唤起,枚举当前所有窗口并支持点选绘制
+    private val windowListOverlay = OverlayWindowListWindow(this) { debugOverlay.closeWindowList() }
 
     // 一像素完全透明悬浮窗:触摸穿透,不遮挡不影响任何操作
     private var pixelView: View? = null
@@ -214,8 +166,8 @@ open class AutoTaskAccessibilityService : AccessibilityService() {
             overlay.show()
         } else {
             overlay.hide()
-            // 悬浮球已隐藏,窗口列表失去入口:一并释放它预加入的窗口
-            windowListOverlay.release()
+            // 悬浮球已隐藏,窗口列表失去入口:一并隐藏(窗口保留,重开时只切显隐)
+            windowListOverlay.hide()
         }
         AppLog.info(LogSource.Overlay, if (show) "节点悬浮窗已开启" else "节点悬浮窗已关闭")
         notifyOverlayShowing(show && sInstance != null)
@@ -227,19 +179,67 @@ open class AutoTaskAccessibilityService : AccessibilityService() {
         windowListOverlay.prepare()
     }
 
-    /** 唤起窗口列表悬浮窗(由节点悬浮球长按调用);服务未连接时返回 false */
-    fun showWindowListOverlay(): Boolean {
-        AppLog.info(LogSource.Overlay, "窗口列表已打开")
-        windowListOverlay.show()
-        return sInstance != null
+    /**
+     * 窗口列表显隐:由调试悬浮窗的面板状态机统一驱动(唯一入口)。
+     * 显隐的真正决策在状态机里,这里只负责把结果落到窗口上。
+     */
+    fun setWindowListVisible(visible: Boolean) {
+        if (visible) {
+            AppLog.info(LogSource.Overlay, "窗口列表已打开")
+            windowListOverlay.show()
+        } else {
+            windowListOverlay.hide()
+        }
     }
 
-    /** 窗口列表点选某窗口:由节点悬浮窗绘制该窗口的节点边界(需主线程调用) */
-    fun showWindowBounds(window: AccessibilityWindowInfo): Boolean =
-        debugOverlay.showBoundsFor(window)
+    /**
+     * 窗口列表点选某窗口:取最新窗口实例再绘制(需主线程调用)。
+     * 枚举列表时的窗口引用可能已失效 —— 输入法窗口每次弹出都可能被系统重建(id 变化),
+     * 过期引用的 root 会返回 null,表现为"无法获取输入法节点信息"。
+     * 匹配顺序:同 id → 同类型+同包名 → 同类型(输入法等系统窗口同类型唯一)→ 原引用。
+     */
+    fun showWindowBounds(window: AccessibilityWindowInfo): Boolean {
+        val fresh = freshWindowById(window.id) ?: freshWindowLike(window) ?: window
+        return debugOverlay.showBoundsFor(fresh)
+    }
 
-    /** 窗口列表恢复/关闭:关掉它触发的绘制层 */
-    fun hideWindowBounds() = debugOverlay.hideBounds()
+    /** 按窗口 id 在全部显示器中找最新的窗口实例;找不到返回 null */
+    private fun freshWindowById(id: Int): AccessibilityWindowInfo? =
+        allWindows().firstOrNull { it.id == id }
+
+    /**
+     * id 失配(窗口已被系统重建)时按 类型+包名 找最新窗口实例。
+     * 输入法同屏只有一个,按类型即可命中;应用窗口再用包名二次确认防误匹配。
+     */
+    private fun freshWindowLike(window: AccessibilityWindowInfo): AccessibilityWindowInfo? {
+        val all = allWindows()
+        val pkg = runCatching { window.root?.packageName?.toString() }.getOrNull()
+        return all.firstOrNull {
+            it.type == window.type &&
+                (pkg == null || runCatching { it.root?.packageName?.toString() }.getOrNull() == pkg)
+        } ?: all.firstOrNull { it.type == window.type }
+    }
+
+    /** 全部显示器上的窗口(merged);不可用时退回默认显示器 */
+    private fun allWindows(): List<AccessibilityWindowInfo> {
+        runCatching { windowsOnAllDisplays }.getOrNull()?.let { perDisplay ->
+            val out = ArrayList<AccessibilityWindowInfo>()
+            for (i in 0 until perDisplay.size()) out += perDisplay.valueAt(i).orEmpty()
+            if (out.isNotEmpty()) return out
+        }
+        return runCatching { windows }.getOrNull().orEmpty()
+    }
+
+    /** 指定窗口对应的 Activity:title 是组件形式直接采用,否则回退该包最近确认过的 Activity */
+    fun activityOfWindow(window: AccessibilityWindowInfo): ComponentName? {
+        val title = runCatching { window.title?.toString()?.trim() }.getOrNull().orEmpty()
+        if (title.contains('/')) {
+            ComponentName.unflattenFromString(title)?.let { return it }
+        }
+        val pkg = runCatching { window.root?.packageName?.toString() }.getOrNull().orEmpty()
+        if (pkg.isEmpty()) return null
+        return getValidActivity(pkg)
+    }
 
     override fun onUnbind(intent: Intent?): Boolean {
         sInstance = null
@@ -295,14 +295,6 @@ open class AutoTaskAccessibilityService : AccessibilityService() {
 
         val packageName = event.packageName?.toString()
 
-        if (packageName == "com.phoenix.read" && event.eventType == AccessibilityEvent.TYPE_VIEW_SCROLLED){
-            // 滚动事件很密集,500ms 内的后续事件直接丢弃,避免刷屏
-            val now = SystemClock.uptimeMillis()
-            if (now - lastScrollLogAt >= SCROLL_LOG_DEBOUNCE_MS) {
-                lastScrollLogAt = now
-                Log.d("aaa", "${eventTypeToString(event.eventType)}  ${currentActivity()}")
-            }
-        }
         when (event.eventType) {
             AccessibilityEvent.TYPE_WINDOW_STATE_CHANGED -> {
                 val className = event.className?.toString() ?: ""
@@ -313,29 +305,9 @@ open class AutoTaskAccessibilityService : AccessibilityService() {
                     lastActivity = cn
                     recordValidActivity(cn)
                 }
-                // 调试悬浮窗标题跟随前台窗口切换
-                notifyWindowChanged()
             }
 
             else -> Unit
-        }
-
-        // 广告跳过测试(临时):命中广告页渲染层就上滑切走。
-        // 判据是「像广告页」而非「存在广告节点」:红果会把广告播放器视图留着不销毁,
-        // 残留视图 uiautomator dump 看不到、无障碍节点树看得到,且 isVisibleToUser 仍为 true,
-        // 所以 [visible=true] 挡不住 —— 再要求「正常播放页的视频容器 #i62 不在场」作反证。
-        // 条件由廉价到昂贵依次短路:冷却 → Activity 限定 → 反证 → 广告渲染层,
-        // 密集事件下绝大多数在前面就被挡掉,不会每来一个事件都走一遍整树。
-        if (packageName == "com.phoenix.read") {
-            val now = SystemClock.uptimeMillis()
-            if (now - lastAdSwipeAt >= 2_000L &&
-                currentActivity()?.className == "com.dragon.read.component.shortvideo.impl.ShortSeriesActivity"  &&
-                jsoupNodes.exists("TextureView#ttlive_player_render_view[visible=true]")
-            ) {
-                lastAdSwipeAt = now
-                Log.d(TAG, "命中广告渲染层,执行上滑")
-                swipeUp()
-            }
         }
 
         // 订阅方(规则引擎等)只拿事件类型与包名
@@ -357,15 +329,6 @@ open class AutoTaskAccessibilityService : AccessibilityService() {
     /** 各应用最近一次确认的真实 Activity(非 Activity 窗口事件时按包名回填) */
     private val lastValidActivityByApp = HashMap<String, ComponentName>()
 
-    /** 上次滚动调试日志的时间戳(uptimeMillis),配合 [SCROLL_LOG_DEBOUNCE_MS] 防抖 */
-    private var lastScrollLogAt = 0L
-
-    /** 上次命中广告渲染层并上滑的时间戳(uptimeMillis),用于上滑冷却防抖 */
-    private var lastAdSwipeAt = 0L
-
-    /** jsoup 语法选择器(广告跳过测试用) */
-    private val jsoupNodes by lazy { JsoupNodes(this) }
-
     private fun recordValidActivity(cn: ComponentName) {
         synchronized(lastValidActivityByApp) {
             lastValidActivityByApp[cn.packageName ?: ""] = cn
@@ -374,22 +337,6 @@ open class AutoTaskAccessibilityService : AccessibilityService() {
 
     fun getValidActivity(pkg: String): ComponentName? = synchronized(lastValidActivityByApp) {
         lastValidActivityByApp[pkg]
-    }
-
-    /**
-     * 指定窗口对应的 Activity:
-     *  - 应用窗口的 title 即 flattenToShortString("pkg/.MainActivity"),直接采用;
-     *  - title 不是组件形式(对话框/系统窗口)时,回退到该包最近确认过的真实 Activity。
-     * 节点信息悬浮窗与窗口列表都用它,避免两处各写一套解析规则。
-     */
-    fun activityOfWindow(window: AccessibilityWindowInfo): ComponentName? {
-        val title = runCatching { window.title?.toString()?.trim() }.getOrNull().orEmpty()
-        if (title.contains('/')) {
-            ComponentName.unflattenFromString(title)?.let { return it }
-        }
-        val pkg = runCatching { window.root?.packageName?.toString() }.getOrNull().orEmpty()
-        if (pkg.isEmpty()) return null
-        return getValidActivity(pkg)
     }
 
     /** 桌面(Launcher)包名:用于把桌面从普通应用窗口里分出来;解析失败为 null */
@@ -473,17 +420,6 @@ open class AutoTaskAccessibilityService : AccessibilityService() {
         return lastActivity
     }
 
-    /** 窗口状态变化监听(节点悬浮窗标题跟随 + 窗口列表重排;监听方自行切主线程) */
-    private val windowListeners = CopyOnWriteArrayList<() -> Unit>()
-
-    fun addWindowListener(listener: () -> Unit) {
-        windowListeners += listener
-    }
-
-    fun removeWindowListener(listener: () -> Unit) {
-        windowListeners -= listener
-    }
-
     /** 最近一次窗口状态变化时间:动作之间靠它判断页面是否已安静下来 */
     @Volatile
     var lastWindowChangeAt: Long = 0L
@@ -491,7 +427,6 @@ open class AutoTaskAccessibilityService : AccessibilityService() {
 
     private fun notifyWindowChanged() {
         lastWindowChangeAt = System.currentTimeMillis()
-        windowListeners.toList().forEach { it() }
     }
 
     /** className 前缀过滤:排除 android.widget.* / android.app.* 等系统窗口类 */

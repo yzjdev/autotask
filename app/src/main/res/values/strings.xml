@@ -10,9 +10,6 @@
     <!-- 服务详细介绍(较新平台在设置页展开显示,旧平台忽略) -->
     <string name="accessibility_service_intro">开启后,本服务会读取当前窗口的控件信息,并在你为某个应用开启自动化规则时,按规则模拟点击/滑动;关闭服务后立即停止读取。</string>
 
-    <!-- 系统「通知使用权」列表里显示的通知监听服务名 -->
-    <string name="message_listener_label">自动化助手消息监听</string>
-
     <!-- 写入安全设置权限已授权 -->
     <string name="status_secure_granted">已授权,可读写无障碍开关。</string>
 
