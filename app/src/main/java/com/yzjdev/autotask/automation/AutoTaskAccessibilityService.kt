@@ -9,10 +9,12 @@ import android.graphics.Path
 import android.graphics.PixelFormat
 import android.os.Handler
 import android.os.Looper
+import android.os.SystemClock
 import android.view.Gravity
 import android.view.View
 import android.view.WindowManager
 import android.provider.Settings
+import android.util.Log
 import android.view.accessibility.AccessibilityEvent
 import android.view.accessibility.AccessibilityNodeInfo
 import android.view.accessibility.AccessibilityWindowInfo
@@ -20,6 +22,7 @@ import java.util.HashSet
 import java.util.concurrent.CopyOnWriteArrayList
 import com.yzjdev.autotask.automation.log.AppLog
 import com.yzjdev.autotask.automation.log.LogSource
+import com.yzjdev.autotask.jsr.JsoupNodes
 
 /**
  * 窗口类别:在无障碍的窗口类型之上再细分 ——
@@ -55,6 +58,50 @@ open class AutoTaskAccessibilityService : AccessibilityService() {
 
     companion object {
         private val MAIN = Handler(Looper.getMainLooper())
+
+        /** 节点树打印的 logcat 标签 */
+        private const val TAG = "AutoTaskTree"
+
+        /** 滚动调试日志的防抖窗口(毫秒):密集滚动事件一个窗口内只打一条 */
+        private const val SCROLL_LOG_DEBOUNCE_MS = 500L
+
+        /**
+         * 无障碍事件类型数值 → 常量名。
+         *
+         * 给 [onAccessibilityEvent] 里 `event.eventType` 的调试输出用:单看数字认不出事件,
+         * 配上名称才能一眼分辨。未知取值返回 `UNKNOWN(0x…)`,不返回空串。
+         */
+        fun eventTypeToString(eventType: Int): String = when (eventType) {
+            AccessibilityEvent.TYPE_VIEW_CLICKED -> "TYPE_VIEW_CLICKED"
+            AccessibilityEvent.TYPE_VIEW_LONG_CLICKED -> "TYPE_VIEW_LONG_CLICKED"
+            AccessibilityEvent.TYPE_VIEW_SELECTED -> "TYPE_VIEW_SELECTED"
+            AccessibilityEvent.TYPE_VIEW_FOCUSED -> "TYPE_VIEW_FOCUSED"
+            AccessibilityEvent.TYPE_VIEW_TEXT_CHANGED -> "TYPE_VIEW_TEXT_CHANGED"
+            AccessibilityEvent.TYPE_WINDOW_STATE_CHANGED -> "TYPE_WINDOW_STATE_CHANGED"
+            AccessibilityEvent.TYPE_NOTIFICATION_STATE_CHANGED -> "TYPE_NOTIFICATION_STATE_CHANGED"
+            AccessibilityEvent.TYPE_VIEW_HOVER_ENTER -> "TYPE_VIEW_HOVER_ENTER"
+            AccessibilityEvent.TYPE_VIEW_HOVER_EXIT -> "TYPE_VIEW_HOVER_EXIT"
+            AccessibilityEvent.TYPE_TOUCH_EXPLORATION_GESTURE_START -> "TYPE_TOUCH_EXPLORATION_GESTURE_START"
+            AccessibilityEvent.TYPE_TOUCH_EXPLORATION_GESTURE_END -> "TYPE_TOUCH_EXPLORATION_GESTURE_END"
+            AccessibilityEvent.TYPE_WINDOW_CONTENT_CHANGED -> "TYPE_WINDOW_CONTENT_CHANGED"
+            AccessibilityEvent.TYPE_VIEW_SCROLLED -> "TYPE_VIEW_SCROLLED"
+            AccessibilityEvent.TYPE_VIEW_TEXT_SELECTION_CHANGED -> "TYPE_VIEW_TEXT_SELECTION_CHANGED"
+            AccessibilityEvent.TYPE_ANNOUNCEMENT -> "TYPE_ANNOUNCEMENT"
+            AccessibilityEvent.TYPE_VIEW_ACCESSIBILITY_FOCUSED -> "TYPE_VIEW_ACCESSIBILITY_FOCUSED"
+            AccessibilityEvent.TYPE_VIEW_ACCESSIBILITY_FOCUS_CLEARED -> "TYPE_VIEW_ACCESSIBILITY_FOCUS_CLEARED"
+            AccessibilityEvent.TYPE_VIEW_TEXT_TRAVERSED_AT_MOVEMENT_GRANULARITY ->
+                "TYPE_VIEW_TEXT_TRAVERSED_AT_MOVEMENT_GRANULARITY"
+            AccessibilityEvent.TYPE_GESTURE_DETECTION_START -> "TYPE_GESTURE_DETECTION_START"
+            AccessibilityEvent.TYPE_GESTURE_DETECTION_END -> "TYPE_GESTURE_DETECTION_END"
+            AccessibilityEvent.TYPE_TOUCH_INTERACTION_START -> "TYPE_TOUCH_INTERACTION_START"
+            AccessibilityEvent.TYPE_TOUCH_INTERACTION_END -> "TYPE_TOUCH_INTERACTION_END"
+            AccessibilityEvent.TYPE_WINDOWS_CHANGED -> "TYPE_WINDOWS_CHANGED"
+            AccessibilityEvent.TYPE_VIEW_CONTEXT_CLICKED -> "TYPE_VIEW_CONTEXT_CLICKED"
+            AccessibilityEvent.TYPE_ASSIST_READING_CONTEXT -> "TYPE_ASSIST_READING_CONTEXT"
+            AccessibilityEvent.TYPE_SPEECH_STATE_CHANGE -> "TYPE_SPEECH_STATE_CHANGE"
+            AccessibilityEvent.TYPE_VIEW_TARGETED_BY_SCROLL -> "TYPE_VIEW_TARGETED_BY_SCROLL"
+            else -> "UNKNOWN(0x" + Integer.toHexString(eventType) + ")"
+        }
 
         @Volatile
         private var sInstance: AutoTaskAccessibilityService? = null
@@ -248,6 +295,14 @@ open class AutoTaskAccessibilityService : AccessibilityService() {
 
         val packageName = event.packageName?.toString()
 
+        if (packageName == "com.phoenix.read" && event.eventType == AccessibilityEvent.TYPE_VIEW_SCROLLED){
+            // 滚动事件很密集,500ms 内的后续事件直接丢弃,避免刷屏
+            val now = SystemClock.uptimeMillis()
+            if (now - lastScrollLogAt >= SCROLL_LOG_DEBOUNCE_MS) {
+                lastScrollLogAt = now
+                Log.d("aaa", "${eventTypeToString(event.eventType)}  ${currentActivity()}")
+            }
+        }
         when (event.eventType) {
             AccessibilityEvent.TYPE_WINDOW_STATE_CHANGED -> {
                 val className = event.className?.toString() ?: ""
@@ -263,6 +318,24 @@ open class AutoTaskAccessibilityService : AccessibilityService() {
             }
 
             else -> Unit
+        }
+
+        // 广告跳过测试(临时):命中广告页渲染层就上滑切走。
+        // 判据是「像广告页」而非「存在广告节点」:红果会把广告播放器视图留着不销毁,
+        // 残留视图 uiautomator dump 看不到、无障碍节点树看得到,且 isVisibleToUser 仍为 true,
+        // 所以 [visible=true] 挡不住 —— 再要求「正常播放页的视频容器 #i62 不在场」作反证。
+        // 条件由廉价到昂贵依次短路:冷却 → Activity 限定 → 反证 → 广告渲染层,
+        // 密集事件下绝大多数在前面就被挡掉,不会每来一个事件都走一遍整树。
+        if (packageName == "com.phoenix.read") {
+            val now = SystemClock.uptimeMillis()
+            if (now - lastAdSwipeAt >= 2_000L &&
+                currentActivity()?.className == "com.dragon.read.component.shortvideo.impl.ShortSeriesActivity"  &&
+                jsoupNodes.exists("TextureView#ttlive_player_render_view[visible=true]")
+            ) {
+                lastAdSwipeAt = now
+                Log.d(TAG, "命中广告渲染层,执行上滑")
+                swipeUp()
+            }
         }
 
         // 订阅方(规则引擎等)只拿事件类型与包名
@@ -283,6 +356,15 @@ open class AutoTaskAccessibilityService : AccessibilityService() {
 
     /** 各应用最近一次确认的真实 Activity(非 Activity 窗口事件时按包名回填) */
     private val lastValidActivityByApp = HashMap<String, ComponentName>()
+
+    /** 上次滚动调试日志的时间戳(uptimeMillis),配合 [SCROLL_LOG_DEBOUNCE_MS] 防抖 */
+    private var lastScrollLogAt = 0L
+
+    /** 上次命中广告渲染层并上滑的时间戳(uptimeMillis),用于上滑冷却防抖 */
+    private var lastAdSwipeAt = 0L
+
+    /** jsoup 语法选择器(广告跳过测试用) */
+    private val jsoupNodes by lazy { JsoupNodes(this) }
 
     private fun recordValidActivity(cn: ComponentName) {
         synchronized(lastValidActivityByApp) {
@@ -522,6 +604,61 @@ open class AutoTaskAccessibilityService : AccessibilityService() {
             if (walkNode(child, onNode)) return true
         }
         return false
+    }
+
+    /**
+     * 以树形结构打印当前窗口的节点树,逐行写入 logcat([TAG]),并返回整棵树文本。
+     *
+     * 独立递归,刻意不复用 [traverseNodes]/[findFirst]:那条路径命中即 recycle 且带去重集合,
+     * 整树输出会第二次就查不到东西。遍历目标与节点快照一致 —— 优先「焦点且激活」的窗口,
+     * 退回活动窗口。缩进用 `├─`/`└─` 连接线,每行形如:
+     * `类名#vid "文本" desc:"描述" [可点击] @(x,y,w×h)`。
+     * 不限制递归深度,整棵子树全部展开。
+     */
+    fun printNodeTree(): String {
+        val root = focusedWindow()?.root ?: rootInActiveWindow ?: return ""
+        val sb = StringBuilder()
+        appendNodeLine(root, "", true, 0, sb)
+        val text = sb.toString().trimEnd('\n')
+        text.lineSequence().forEach { Log.d(TAG, it) }
+        return text
+    }
+
+    private fun appendNodeLine(
+        node: AccessibilityNodeInfo,
+        prefix: String,
+        isLast: Boolean,
+        depth: Int,
+        sb: StringBuilder,
+    ) {
+        sb.append(prefix)
+        // 根节点不带连接线,避免树顶出现孤立的拐角
+        if (depth > 0) sb.append(if (isLast) "└─ " else "├─ ")
+        sb.append(nodeSummary(node)).append('\n')
+        // 先收集有效子节点:getChild 可能返回 null,按 childCount 算「最后一个」会错位
+        val children = (0 until node.childCount).mapNotNull { node.getChild(it) }
+        val childPrefix = if (depth == 0) "" else prefix + if (isLast) "   " else "│  "
+        children.forEachIndexed { i, child ->
+            appendNodeLine(child, childPrefix, i == children.size - 1, depth + 1, sb)
+        }
+    }
+
+    /** 单行摘要:类名#vid "文本" desc:"描述" [可点击] @(x,y,w×h) */
+    private fun nodeSummary(node: AccessibilityNodeInfo): String {
+        val cls = node.className?.toString()?.substringAfterLast('.') ?: "?"
+        val vid = node.viewIdResourceName?.substringAfterLast('/')?.takeIf { it.isNotEmpty() }
+        val text = node.text?.toString()?.takeIf { it.isNotBlank() }
+        val desc = node.contentDescription?.toString()?.takeIf { it.isNotBlank() }
+        val rect = android.graphics.Rect()
+        node.getBoundsInScreen(rect)
+        return buildString {
+            append(cls)
+            if (vid != null) append("#$vid")
+            if (text != null) append(" \"$text\"")
+            if (desc != null) append(" desc:\"$desc\"")
+            if (node.isClickable) append(" [可点击]")
+            append(" @(${rect.left},${rect.top},${rect.width()}×${rect.height()})")
+        }
     }
 
     // ---- 动作 ----

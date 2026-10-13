@@ -137,6 +137,8 @@ class AutomationManager private constructor(appContext: Context) {
     private var statusText = ""
     private var bindCallbackInstalled = false
     private var pollRunnable: Runnable? = null
+    // 启动自动开启无障碍只做一次,避免每次回到前台都与用户的手动关闭相争
+    private var launchAutoEnableDone = false
     private val observers = mutableListOf<LifecycleOwner>()
     private val callbacks = mutableListOf<(State) -> Unit>()
 
@@ -180,17 +182,31 @@ class AutomationManager private constructor(appContext: Context) {
     }
 
     /**
-     * 启动 / 回到前台时只做状态刷新,不触发任何自动动作。
+     * 启动 / 回到前台时刷新状态,并在**本次进程首次**启动时自动开启无障碍服务。
      *
-     * 刻意不做的事(按需求):
-     * - 不自动开启无障碍服务;
-     * - 不自动请求 Shizuku;
-     * - 不自动跳转无障碍设置。
-     * 所有权限申请与跳转都必须由用户显式点击后,再经弹窗确认。
+     * 自动开启只做一次:用户若手动关闭无障碍,再次回到前台不再顶回去,
+     * 否则每次 onResume 都会和用户的操作相争。
+     * 仍不做的两件事:不自动请求 Shizuku、不自动跳转无障碍设置 ——
+     * 缺少「写入安全设置」权限时静默跳过,跳转只能由用户显式确认后执行。
      */
     @MainThread
     fun bootstrap() {
         refresh()
+        if (!launchAutoEnableDone) {
+            launchAutoEnableDone = true
+            autoEnableAccessibility()
+        }
+    }
+
+    /**
+     * 启动时自动开启无障碍服务:已有「写入安全设置」权限就直接写入 Settings,无需用户点击。
+     * 已开启或缺权限时静默返回,不改动任何状态文案以外的行为。
+     */
+    @MainThread
+    private fun autoEnableAccessibility() {
+        if (serviceEnabled) return
+        if (!secureGranted) return
+        enableAccessibilityService()
     }
 
     /**
