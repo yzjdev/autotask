@@ -2177,12 +2177,18 @@ private fun AppListCard(
                     }
                 }
                 Spacer(modifier = Modifier.height(2.dp))
+                // 点包名复制到剪贴板
                 Text(
                     text = app.packageName,
                     style = MaterialTheme.typography.labelSmall,
                     color = scheme.onSurfaceVariant.copy(alpha = 0.8f),
                     maxLines = 1,
                     overflow = TextOverflow.Ellipsis,
+                    modifier = Modifier
+                        .offset(x = (-4).dp)
+                        .clip(MaterialTheme.shapes.small)
+                        .clickable { copyText(context, app.packageName) }
+                        .padding(horizontal = 4.dp, vertical = 2.dp),
                 )
             }
             // 联网开关:图标+文字胶囊,联网=强调色浅底,禁网=错误色实底(无描边)
