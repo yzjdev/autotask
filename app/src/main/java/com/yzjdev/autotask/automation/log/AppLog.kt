@@ -3,6 +3,7 @@ package com.yzjdev.autotask.automation.log
 import android.content.Context
 import java.io.File
 import java.text.SimpleDateFormat
+import java.util.Calendar
 import java.util.Locale
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
@@ -31,6 +32,7 @@ enum class LogSource(val label: String) {
 
 /** 一条日志:只存时间戳,展示时再格式化,避免存储层关心展示格式 */
 data class LogRecord(
+    /** 唯一 id,界面列表拿它当 key —— 不能用时间戳,同一毫秒的多条会撞 */
     val id: Long,
     val at: Long,
     val level: LogLevel,
@@ -58,6 +60,9 @@ object AppLog {
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
     private val pending = Channel<String>(Channel.UNLIMITED)
     private val timeFormat = SimpleDateFormat("HH:mm:ss", Locale.getDefault())
+    private val dayFormat = SimpleDateFormat("MM-dd", Locale.getDefault())
+    // SimpleDateFormat 非线程安全:两个格式化器共用一把锁
+    private val formatLock = Any()
     private val lock = Any()
 
     private val _records = MutableStateFlow<List<LogRecord>>(emptyList())
@@ -128,7 +133,29 @@ object AppLog {
     }
 
     /** 展示用时间(HH:mm:ss),由界面调用,避免存储层持有格式化结果 */
-    fun formatTime(at: Long): String = synchronized(timeFormat) { timeFormat.format(at) }
+    fun formatTime(at: Long): String = synchronized(formatLock) { timeFormat.format(at) }
+
+    /** 日志流的日期分隔:今天 / 昨天 / MM-dd */
+    fun formatDay(at: Long): String = synchronized(formatLock) {
+        val target = calendar(at)
+        val today = calendar(System.currentTimeMillis())
+        val yesterday = calendar(System.currentTimeMillis()).apply { add(Calendar.DAY_OF_YEAR, -1) }
+        when {
+            isSameDay(target, today) -> "今天"
+            isSameDay(target, yesterday) -> "昨天"
+            else -> dayFormat.format(target.time)
+        }
+    }
+
+    /** 两个时间戳是否同一天:日志流据此插日期分隔条 */
+    fun isSameDay(atA: Long, atB: Long): Boolean = isSameDay(calendar(atA), calendar(atB))
+
+    private fun calendar(at: Long): Calendar =
+        Calendar.getInstance().apply { timeInMillis = at }
+
+    private fun isSameDay(a: Calendar, b: Calendar): Boolean =
+        a.get(Calendar.YEAR) == b.get(Calendar.YEAR) &&
+            a.get(Calendar.DAY_OF_YEAR) == b.get(Calendar.DAY_OF_YEAR)
 
     private fun encode(entry: LogRecord): String = buildString {
         append(entry.at).append(FIELD_SEP)
@@ -147,8 +174,10 @@ object AppLog {
             val at = parts[0].toLongOrNull() ?: return@mapNotNull null
             val level = LogLevel.entries.firstOrNull { it.name == parts[1] } ?: return@mapNotNull null
             val source = LogSource.entries.firstOrNull { it.name == parts[2] } ?: return@mapNotNull null
-            LogRecord(id = at, at = at, level = level, source = source, message = parts[3])
+            LogRecord(id = 0L, at = at, level = level, source = source, message = parts[3])
         }.takeLast(MEMORY_CAPACITY)
+            // id 只是列表 key,必须唯一:时间戳会撞(同一毫秒的多条),按顺序重编号
+            .mapIndexed { index, record -> record.copy(id = index.toLong()) }
     }
 
     /** 启动时裁剪超限文件,避免日志无限增长 */

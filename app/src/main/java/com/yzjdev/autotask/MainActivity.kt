@@ -6,6 +6,7 @@ import android.os.Bundle
 import android.provider.Settings
 import android.provider.Settings.ACTION_REQUEST_IGNORE_BATTERY_OPTIMIZATIONS
 import android.widget.Toast
+import androidx.activity.compose.BackHandler
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
 import androidx.activity.enableEdgeToEdge
@@ -20,6 +21,7 @@ import androidx.compose.foundation.ExperimentalFoundationApi
 import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.combinedClickable
 import androidx.compose.foundation.gestures.awaitEachGesture
 import androidx.compose.foundation.gestures.awaitFirstDown
 import androidx.compose.foundation.isSystemInDarkTheme
@@ -41,7 +43,9 @@ import androidx.compose.foundation.layout.navigationBarsPadding
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
+import androidx.compose.foundation.layout.widthIn
 import androidx.compose.foundation.lazy.LazyColumn
+import androidx.compose.foundation.lazy.LazyRow
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.foundation.rememberScrollState
@@ -50,16 +54,22 @@ import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.text.BasicTextField
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.automirrored.filled.ArrowBack
 import androidx.compose.material.icons.automirrored.filled.Article
+import androidx.compose.material.icons.automirrored.filled.Chat
 import androidx.compose.material.icons.automirrored.filled.KeyboardArrowRight
+import androidx.compose.material.icons.automirrored.filled.Rule
 import androidx.compose.material.icons.filled.Adjust
 import androidx.compose.material.icons.filled.Apps
 import androidx.compose.material.icons.filled.BatterySaver
 import androidx.compose.material.icons.filled.Check
 import androidx.compose.material.icons.filled.Close
+import androidx.compose.material.icons.filled.DeleteSweep
 import androidx.compose.material.icons.filled.Home
 import androidx.compose.material.icons.filled.Layers
 import androidx.compose.material.icons.filled.MoreVert
+import androidx.compose.material.icons.filled.NotificationsActive
+import androidx.compose.material.icons.filled.Person
 import androidx.compose.material.icons.filled.PlayCircleOutline
 import androidx.compose.material.icons.filled.PowerSettingsNew
 import androidx.compose.material.icons.filled.Search
@@ -123,6 +133,8 @@ import androidx.compose.ui.tooling.preview.Preview
 import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import androidx.lifecycle.Lifecycle
+import androidx.lifecycle.LifecycleEventObserver
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import androidx.lifecycle.compose.LocalLifecycleOwner
 import rikka.shizuku.Shizuku
@@ -146,6 +158,10 @@ import com.yzjdev.autotask.automation.log.AppLog
 import com.yzjdev.autotask.automation.log.LogLevel
 import com.yzjdev.autotask.automation.log.LogRecord
 import com.yzjdev.autotask.automation.log.LogSource
+import com.yzjdev.autotask.notify.MessageNotificationListener
+import com.yzjdev.autotask.notify.MessageRecord
+import com.yzjdev.autotask.notify.MessageSources
+import com.yzjdev.autotask.notify.MessageStore
 import com.yzjdev.autotask.ui.liquid.LiquidBottomTab
 import com.yzjdev.autotask.ui.liquid.LiquidBottomTabs
 import com.yzjdev.autotask.ui.theme.AutoTaskTheme
@@ -236,12 +252,9 @@ fun AutomationScreen() {
     var overlayOn by remember {
         mutableStateOf(AutoTaskAccessibilityService.isRunning && AutoTaskAccessibilityService.instance?.isDebugOverlayShowing == true)
     }
-    // 服务实例绑定状态:可观察(连接/断开回调驱动),供「待连接」判定与 UI 自动刷新
-    var serviceBound by remember { mutableStateOf(AutoTaskAccessibilityService.isRunning) }
-    // 订阅无障碍服务连接状态:连接/断开同步绑定状态;服务断开时悬浮窗已被服务 hide(),同步复位开关状态
+    // 订阅无障碍服务连接状态:服务断开时悬浮窗已被服务 hide(),同步复位开关状态
     DisposableEffect(Unit) {
         val listener = { running: Boolean ->
-            serviceBound = running
             if (!running) {
                 overlayOn = false
             }
@@ -253,16 +266,6 @@ fun AutomationScreen() {
         onDispose {
             AutoTaskAccessibilityService.removeStateListener(listener)
             AutoTaskAccessibilityService.removeOverlayListener(overlayListener)
-        }
-    }
-    // 待连接轮询:设置已开但服务实例未绑定(中间态)时每秒刷新,直至 onServiceConnected 完成
-    LaunchedEffect(uiState.isAccessibilityEnabled, serviceBound) {
-        if (uiState.isAccessibilityEnabled && !serviceBound) {
-            while (!AutoTaskAccessibilityService.isRunning) {
-                delay(1000)
-                automation.refresh()
-            }
-            serviceBound = true
         }
     }
     val scope = rememberCoroutineScope()
@@ -388,11 +391,12 @@ fun AutomationScreen() {
                     bottomInset = bottomInset,
                     modifier = contentModifier,
                 )
-                2 -> LogsScreen(bottomInset = bottomInset, modifier = contentModifier)
+                2 -> RulesScreen(bottomInset = bottomInset, modifier = contentModifier)
+                3 -> MessagesScreen(bottomInset = bottomInset, modifier = contentModifier)
+                4 -> LogsScreen(bottomInset = bottomInset, modifier = contentModifier)
                 else -> HomeScreen(
                     context = context,
                     uiState = uiState,
-                    serviceBound = serviceBound,
                     overlayOn = overlayOn,
                     onOverlayToggle = {
                         val target = !overlayOn
@@ -445,11 +449,13 @@ fun AutomationScreen() {
 /** 导航项:索引 + 标题 + 图标 */
 private data class NavTab(val index: Int, val label: String, val icon: ImageVector)
 
-/** 底部导航项:首页 / 应用 / 日志 */
+/** 底部导航项:首页 / 应用 / 规则 / 消息 / 日志 */
 private val NavTabs = listOf(
     NavTab(0, "首页", Icons.Filled.Home),
     NavTab(1, "应用", Icons.Filled.Apps),
-    NavTab(2, "日志", Icons.AutoMirrored.Filled.Article),
+    NavTab(2, "规则", Icons.AutoMirrored.Filled.Rule),
+    NavTab(3, "消息", Icons.AutoMirrored.Filled.Chat),
+    NavTab(4, "日志", Icons.AutoMirrored.Filled.Article),
 )
 
 /** 日志级别对应的强调色 */
@@ -462,9 +468,9 @@ private fun logLevelColor(level: LogLevel): Color = when (level) {
 }
 
 /**
- * 日志页:控制台风格 —— 一行一条(时间 / 级别 / 来源 / 正文),
- * 顶部是搜索与级别、来源筛选,其下是计数、记录开关与清空。
- * 数据订阅 [AppLog.records],点按某行查看完整内容并复制。
+ * 日志页:两级导航 —— 列表层按来源聚合(服务 / 悬浮窗 / 禁网 / 权限),
+ * 点按进入该来源的日志流(按天分隔、级别着色、长按复制)。
+ * 顶部保留搜索与级别筛选、记录开关与清空。数据订阅 [AppLog.records]。
  */
 @Composable
 private fun LogsScreen(bottomInset: Dp = 0.dp, modifier: Modifier = Modifier) {
@@ -476,24 +482,44 @@ private fun LogsScreen(bottomInset: Dp = 0.dp, modifier: Modifier = Modifier) {
     var enabled by remember { mutableStateOf(prefs.getBoolean("log_enabled", true)) }
     var query by remember { mutableStateOf("") }
     var levelFilter by remember { mutableStateOf<LogLevel?>(null) }
-    var sourceFilter by remember { mutableStateOf<LogSource?>(null) }
     var levelMenuOpen by remember { mutableStateOf(false) }
-    var sourceMenuOpen by remember { mutableStateOf(false) }
-    var detail by remember { mutableStateOf<LogRecord?>(null) }
+    // 当前打开的来源:null = 停在列表层
+    var openSource by remember { mutableStateOf<LogSource?>(null) }
 
     val all by AppLog.records.collectAsStateWithLifecycle()
-    val shown = remember(all, query, levelFilter, sourceFilter) {
-        all.filter { r ->
-            (levelFilter == null || r.level == levelFilter) &&
-                (sourceFilter == null || r.source == sourceFilter) &&
-                (query.isBlank() ||
-                    r.message.contains(query, true) ||
-                    r.source.label.contains(query, true))
+    // 列表层:按来源聚合统计,有最新日志的来源在前
+    val entries = remember(all, query, levelFilter) { groupLogSources(all, query, levelFilter) }
+    // 打开来源后的日志流:现算,新日志进来立刻接上
+    val stream = remember(openSource, all, query, levelFilter) {
+        val source = openSource
+        if (source == null) {
+            emptyList()
+        } else {
+            all.filter { r ->
+                r.source == source &&
+                    (levelFilter == null || r.level == levelFilter) &&
+                    (query.isBlank() ||
+                        r.message.contains(query, true) ||
+                        r.source.label.contains(query, true))
+            }
         }
+    }
+    // 会话层拦截返回键,先退回列表层
+    BackHandler(enabled = openSource != null) { openSource = null }
+
+    if (openSource != null) {
+        SourceLogStream(
+            source = openSource!!,
+            records = stream,
+            bottomInset = bottomInset,
+            onBack = { openSource = null },
+            modifier = modifier,
+        )
+        return
     }
 
     Column(modifier = modifier.fillMaxSize()) {
-        // 第一行:搜索 + 级别筛选 + 来源筛选
+        // 第一行:搜索 + 级别筛选 + 记录开关
         Row(
             modifier = Modifier
                 .fillMaxWidth()
@@ -541,11 +567,451 @@ private fun LogsScreen(bottomInset: Dp = 0.dp, modifier: Modifier = Modifier) {
                     }
                 }
             }
-            // 来源筛选:同样带条数
+            // 记录开关:暂停后新日志直接丢弃,列表与流都不再增长
+            Switch(
+                checked = enabled,
+                onCheckedChange = {
+                    enabled = it
+                    AppLog.enabled = it
+                    prefs.edit().putBoolean("log_enabled", it).apply()
+                },
+            )
+        }
+
+        // 第二行:计数 + 清空
+        Row(
+            modifier = Modifier
+                .fillMaxWidth()
+                .padding(horizontal = 16.dp, vertical = 2.dp),
+            verticalAlignment = Alignment.CenterVertically,
+        ) {
+            Text(
+                text = "${all.size} 条日志  ${entries.size} 个来源",
+                style = MaterialTheme.typography.labelSmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                modifier = Modifier.weight(1f),
+            )
+            IconButton(onClick = { AppLog.clear() }, enabled = all.isNotEmpty()) {
+                Icon(
+                    imageVector = Icons.Filled.DeleteSweep,
+                    contentDescription = "清空日志",
+                    tint = MaterialTheme.colorScheme.error,
+                )
+            }
+        }
+
+        HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.5f))
+
+        if (entries.isEmpty()) {
+            CenteredPlaceholder {
+                AccentIcon(
+                    Icons.AutoMirrored.Filled.Article,
+                    MaterialTheme.colorScheme.secondary,
+                    size = 56.dp,
+                    iconSize = 28.dp,
+                )
+                Spacer(modifier = Modifier.height(12.dp))
+                Text(
+                    text = when {
+                        !enabled -> "记录已暂停\n开启「记录」后新的操作才会写入"
+                        all.isEmpty() -> "暂无日志\n服务连接、悬浮窗开关、禁网设置会记录在此"
+                        else -> "没有匹配的日志"
+                    },
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    textAlign = TextAlign.Center,
+                )
+            }
+        } else {
+            LazyColumn(
+                modifier = Modifier.fillMaxSize(),
+                contentPadding = PaddingValues(bottom = 16.dp + bottomInset),
+            ) {
+                items(entries, key = { it.source.name }) { entry ->
+                    SourceCard(entry) { openSource = entry.source }
+                }
+            }
+        }
+    }
+}
+
+/** 一个来源的聚合统计:列表层用 */
+private data class LogSourceEntry(
+    val source: LogSource,
+    val total: Int,
+    val latest: LogRecord?,
+    /** 各级别条数,用于卡片上的迷你分布条 */
+    val byLevel: Map<LogLevel, Int>,
+)
+
+/** 来源对应的图标 */
+private fun sourceIcon(source: LogSource): ImageVector = when (source) {
+    LogSource.Service -> Icons.Filled.PowerSettingsNew
+    LogSource.Overlay -> Icons.Filled.Layers
+    LogSource.Network -> Icons.Filled.Wifi
+    LogSource.Permission -> Icons.Filled.Security
+}
+
+/** 来源对应的强调色:沿用日志级别之外的四个主题色槽 */
+@Composable
+private fun sourceColor(source: LogSource): Color = when (source) {
+    LogSource.Service -> MaterialTheme.colorScheme.primary
+    LogSource.Overlay -> MaterialTheme.colorScheme.secondary
+    LogSource.Network -> MaterialTheme.colorScheme.tertiary
+    LogSource.Permission -> MaterialTheme.colorScheme.error
+}
+
+/** 按来源聚合:先套搜索与级别筛选,再分组统计,最新一条有日志的来源排最前 */
+private fun groupLogSources(
+    records: List<LogRecord>,
+    query: String = "",
+    levelFilter: LogLevel? = null,
+): List<LogSourceEntry> {
+    val matched = records.filter { r ->
+        (levelFilter == null || r.level == levelFilter) &&
+            (query.isBlank() ||
+                r.message.contains(query, true) ||
+                r.source.label.contains(query, true))
+    }
+    val grouped = linkedMapOf<LogSource, MutableList<LogRecord>>()
+    matched.forEach { grouped.getOrPut(it.source) { mutableListOf() } += it }
+    return grouped.map { (source, list) ->
+        LogSourceEntry(
+            source = source,
+            total = list.size,
+            latest = list.lastOrNull(),
+            byLevel = list.groupingBy { it.level }.eachCount(),
+        )
+    }.sortedByDescending { it.latest?.at ?: 0L }
+}
+
+/** 来源卡:图标 + 来源名 + 最新一条 + 条数 + 级别分布条 */
+@Composable
+private fun SourceCard(entry: LogSourceEntry, onClick: () -> Unit) {
+    val accent = sourceColor(entry.source)
+    Column(modifier = Modifier.fillMaxWidth()) {
+        Row(
+            modifier = Modifier
+                .fillMaxWidth()
+                .clickable(onClick = onClick)
+                .padding(horizontal = 16.dp, vertical = 10.dp),
+            verticalAlignment = Alignment.CenterVertically,
+        ) {
+            AccentIcon(sourceIcon(entry.source), accent)
+            Spacer(modifier = Modifier.width(12.dp))
+            Column(modifier = Modifier.weight(1f)) {
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    Text(
+                        text = entry.source.label,
+                        style = MaterialTheme.typography.titleSmall,
+                        maxLines = 1,
+                        overflow = TextOverflow.Ellipsis,
+                        modifier = Modifier.weight(1f, fill = false),
+                    )
+                    Spacer(modifier = Modifier.width(8.dp))
+                    entry.latest?.let { latest ->
+                        Text(
+                            text = AppLog.formatTime(latest.at),
+                            style = MaterialTheme.typography.labelSmall,
+                            fontFamily = FontFamily.Monospace,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        )
+                    }
+                }
+                Spacer(modifier = Modifier.height(2.dp))
+                // 最新一条正文:没有就留一行提示
+                Text(
+                    text = entry.latest?.message ?: "暂无记录",
+                    style = MaterialTheme.typography.bodySmall,
+                    fontFamily = FontFamily.Monospace,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis,
+                )
+                // 级别分布条:各级别按比例占宽,一眼看出错误占比
+                if (entry.total > 0) {
+                    Spacer(modifier = Modifier.height(6.dp))
+                    Row(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .height(4.dp)
+                            .clip(CircleShape),
+                    ) {
+                        LogLevel.entries.forEach { level ->
+                            val count = entry.byLevel[level] ?: 0
+                            if (count == 0) return@forEach
+                            Box(
+                                modifier = Modifier
+                                    .weight(count.toFloat())
+                                    .fillMaxHeight()
+                                    .background(logLevelColor(level)),
+                            )
+                        }
+                        // 未命中的级别不占宽;剩余空间留空,不做拉伸
+                    }
+                }
+            }
+            Spacer(modifier = Modifier.width(6.dp))
+            Box(
+                modifier = Modifier
+                    .background(
+                        MaterialTheme.colorScheme.surfaceVariant,
+                        RoundedCornerShape(10.dp),
+                    )
+                    .padding(horizontal = 6.dp, vertical = 2.dp),
+                contentAlignment = Alignment.Center,
+            ) {
+                Text(
+                    text = "${entry.total}",
+                    style = MaterialTheme.typography.labelSmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
+            }
+            Icon(
+                imageVector = Icons.AutoMirrored.Filled.KeyboardArrowRight,
+                contentDescription = null,
+                tint = MaterialTheme.colorScheme.onSurfaceVariant,
+                modifier = Modifier.size(18.dp),
+            )
+        }
+        HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.25f))
+    }
+}
+
+/** 来源日志流:顶栏返回 + 来源名,下面是按天分隔的日志行,长按复制 */
+@Composable
+private fun SourceLogStream(
+    source: LogSource,
+    records: List<LogRecord>,
+    bottomInset: Dp,
+    onBack: () -> Unit,
+    modifier: Modifier = Modifier,
+) {
+    val context = LocalContext.current
+    val listState = rememberLazyListState()
+    // 渲染行:日期分隔条与日志混在同一列表里
+    val rows = remember(records) {
+        buildList<Any> {
+            records.forEachIndexed { index, r ->
+                val prev = records.getOrNull(index - 1)
+                if (prev == null || !AppLog.isSameDay(prev.at, r.at)) {
+                    add(AppLog.formatDay(r.at))
+                }
+                add(r)
+            }
+        }
+    }
+    // 打开与来新日志都贴到底部(最新一条在最下)
+    LaunchedEffect(source, rows.size) {
+        if (rows.isNotEmpty()) listState.animateScrollToItem(rows.size - 1)
+    }
+
+    Column(modifier = modifier.fillMaxSize()) {
+        Row(
+            modifier = Modifier
+                .fillMaxWidth()
+                .padding(horizontal = 8.dp, vertical = 8.dp),
+            verticalAlignment = Alignment.CenterVertically,
+        ) {
+            IconButton(onClick = onBack) {
+                Icon(
+                    imageVector = Icons.AutoMirrored.Filled.ArrowBack,
+                    contentDescription = "返回",
+                )
+            }
+            Column(modifier = Modifier.weight(1f)) {
+                Text(
+                    text = source.label,
+                    style = MaterialTheme.typography.titleMedium,
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis,
+                )
+                Text(
+                    text = "${records.size} 条日志",
+                    style = MaterialTheme.typography.labelSmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
+            }
+        }
+        HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.5f))
+
+        if (rows.isEmpty()) {
+            CenteredPlaceholder {
+                Text(
+                    text = "该来源暂无日志",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    textAlign = TextAlign.Center,
+                )
+            }
+        } else {
+            LazyColumn(
+                state = listState,
+                modifier = Modifier.fillMaxSize(),
+                contentPadding = PaddingValues(horizontal = 12.dp, vertical = 8.dp),
+            ) {
+                items(rows.size, key = { i ->
+                    val row = rows[i]
+                    if (row is LogRecord) row.id else "day-$i"
+                }) { i ->
+                    when (val row = rows[i]) {
+                        is String -> DayDivider(row)
+                        is LogRecord -> LogRow(row) {
+                            copyText(
+                                context,
+                                "${AppLog.formatTime(row.at)} [${row.source.label}] ${row.message}",
+                            )
+                        }
+                    }
+                    if (i == rows.size - 1) Spacer(modifier = Modifier.height(bottomInset + 8.dp))
+                }
+            }
+        }
+    }
+}
+
+/** 日志行:等宽时间 + 级别色条 + 级别 + 正文,长按复制 */
+@OptIn(ExperimentalFoundationApi::class)
+@Composable
+private fun LogRow(record: LogRecord, onCopy: () -> Unit) {
+    val accent = logLevelColor(record.level)
+    Row(
+        modifier = Modifier
+            .fillMaxWidth()
+            .combinedClickable(onClick = {}, onLongClick = onCopy)
+            .padding(vertical = 4.dp),
+    ) {
+        // 级别色条:左侧竖条,一眼区分级别
+        Box(
+            modifier = Modifier
+                .width(3.dp)
+                .height(18.dp)
+                .background(accent, CircleShape),
+        )
+        Spacer(modifier = Modifier.width(8.dp))
+        Text(
+            text = AppLog.formatTime(record.at),
+            style = MaterialTheme.typography.labelSmall,
+            fontFamily = FontFamily.Monospace,
+            color = MaterialTheme.colorScheme.onSurfaceVariant,
+        )
+        Spacer(modifier = Modifier.width(8.dp))
+        Text(
+            text = record.level.label,
+            style = MaterialTheme.typography.labelSmall,
+            fontWeight = FontWeight.SemiBold,
+            color = accent,
+        )
+        Spacer(modifier = Modifier.width(8.dp))
+        Text(
+            text = record.message,
+            style = MaterialTheme.typography.bodySmall,
+            fontFamily = FontFamily.Monospace,
+            modifier = Modifier.weight(1f),
+        )
+    }
+}
+
+/**
+ * 规则页:规则列表。
+ *
+ * 规则数据源尚未接入,列表恒为空 ——
+ * 这里先把页面骨架与空态搭好,接入数据后把占位换成列表项渲染即可。
+ */
+@Composable
+private fun RulesScreen(bottomInset: Dp = 0.dp, modifier: Modifier = Modifier) {
+    Column(
+        modifier = modifier
+            .fillMaxSize()
+            .padding(bottom = bottomInset),
+    ) {
+        // 计数行:与日志页、消息页同一套版式
+        Row(
+            modifier = Modifier
+                .fillMaxWidth()
+                .padding(horizontal = 16.dp, vertical = 10.dp),
+            verticalAlignment = Alignment.CenterVertically,
+        ) {
+            Text(
+                text = "共 0 条",
+                style = MaterialTheme.typography.labelSmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                modifier = Modifier.weight(1f),
+            )
+        }
+
+        HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.5f))
+
+        CenteredPlaceholder {
+            Text(
+                text = "暂无规则\n规则数据源尚未接入",
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                textAlign = TextAlign.Center,
+            )
+        }
+    }
+}
+
+
+
+/**
+ * 消息页:通知栏监听到的 QQ / 微信 消息,两级导航。
+ * 列表层按「来源 + 会话标题」聚成会话(有新消息的在前),点按进入会话流;
+ * 会话流按天分隔展示该会话的全部消息,长按气泡复制。数据订阅 [MessageStore.records]。
+ */
+@Composable
+private fun MessagesScreen(bottomInset: Dp = 0.dp, modifier: Modifier = Modifier) {
+    var query by remember { mutableStateOf("") }
+    // 来源筛选:null = 全部,否则按包名过滤
+    var sourceFilter by remember { mutableStateOf<String?>(null) }
+    var sourceMenuOpen by remember { mutableStateOf(false) }
+    // 当前打开的会话:null = 停在列表层;值为会话 id(来源 + 会话名)
+    var openThread by remember { mutableStateOf<String?>(null) }
+
+    val all by MessageStore.records.collectAsStateWithLifecycle()
+    // 会话层:同一来源 + 同一会话名算一个会话,按最新一条倒序
+    val threads = remember(all, query, sourceFilter) { groupThreads(all, query, sourceFilter) }
+    // 打开的会话按 id 现取,新消息进来能立刻接上;会话被清空则取不到
+    val current = remember(openThread, all) {
+        openThread?.let { id -> groupThreads(all).firstOrNull { it.id == id } }
+    }
+    // 会话在清空后消失:自动退回列表层
+    LaunchedEffect(openThread, current) {
+        if (openThread != null && current == null) openThread = null
+    }
+    // 会话层拦截返回键,先退回列表层
+    BackHandler(enabled = openThread != null) { openThread = null }
+
+    if (current != null) {
+        ConversationThread(
+            thread = current,
+            bottomInset = bottomInset,
+            onBack = { openThread = null },
+            modifier = modifier,
+        )
+        return
+    }
+
+    Column(modifier = modifier.fillMaxSize()) {
+        // 第一行:搜索 + 来源筛选
+        Row(
+            modifier = Modifier
+                .fillMaxWidth()
+                .padding(start = 16.dp, end = 8.dp, top = 8.dp),
+            verticalAlignment = Alignment.CenterVertically,
+            horizontalArrangement = Arrangement.spacedBy(6.dp),
+        ) {
+            SearchField(
+                value = query,
+                onValueChange = { query = it },
+                placeholder = "搜索消息",
+                modifier = Modifier.weight(1f),
+            )
             Box {
                 TextButton(onClick = { sourceMenuOpen = true }) {
                     Text(
-                        text = sourceFilter?.label ?: "来源",
+                        text = sourceFilter?.let { MessageSources.label(it) } ?: "来源",
                         style = MaterialTheme.typography.labelMedium,
                     )
                 }
@@ -562,12 +1028,12 @@ private fun LogsScreen(bottomInset: Dp = 0.dp, modifier: Modifier = Modifier) {
                             }
                         },
                     )
-                    LogSource.entries.forEach { source ->
+                    MessageSources.packages.forEach { pkg ->
                         DropdownMenuItem(
-                            text = { Text("${source.label}  ${all.count { it.source == source }}") },
-                            onClick = { sourceFilter = source; sourceMenuOpen = false },
+                            text = { Text("${MessageSources.label(pkg)}  ${all.count { it.pkg == pkg }}") },
+                            onClick = { sourceFilter = pkg; sourceMenuOpen = false },
                             trailingIcon = {
-                                if (sourceFilter == source) {
+                                if (sourceFilter == pkg) {
                                     Icon(Icons.Filled.Check, contentDescription = null, Modifier.size(16.dp))
                                 }
                             },
@@ -577,7 +1043,7 @@ private fun LogsScreen(bottomInset: Dp = 0.dp, modifier: Modifier = Modifier) {
             }
         }
 
-        // 第二行:计数 + 记录开关 + 清空
+        // 第二行:计数 + 清空
         Row(
             modifier = Modifier
                 .fillMaxWidth()
@@ -585,29 +1051,15 @@ private fun LogsScreen(bottomInset: Dp = 0.dp, modifier: Modifier = Modifier) {
             verticalAlignment = Alignment.CenterVertically,
         ) {
             Text(
-                text = "共 ${all.size} 条  显示 ${shown.size} 条",
+                text = "${all.size} 条消息  ${threads.size} 个会话",
                 style = MaterialTheme.typography.labelSmall,
                 color = MaterialTheme.colorScheme.onSurfaceVariant,
                 modifier = Modifier.weight(1f),
             )
-            Text(
-                text = "记录",
-                style = MaterialTheme.typography.labelSmall,
-                color = MaterialTheme.colorScheme.onSurfaceVariant,
-            )
-            Switch(
-                checked = enabled,
-                onCheckedChange = {
-                    enabled = it
-                    AppLog.enabled = it
-                    prefs.edit().putBoolean("log_enabled", it).apply()
-                },
-                modifier = Modifier.padding(start = 6.dp),
-            )
-            IconButton(onClick = { AppLog.clear() }, enabled = all.isNotEmpty()) {
+            IconButton(onClick = { MessageStore.clear() }, enabled = all.isNotEmpty()) {
                 Icon(
-                    imageVector = Icons.Filled.Close,
-                    contentDescription = "清空日志",
+                    imageVector = Icons.Filled.DeleteSweep,
+                    contentDescription = "清空消息",
                     tint = MaterialTheme.colorScheme.error,
                 )
             }
@@ -615,13 +1067,16 @@ private fun LogsScreen(bottomInset: Dp = 0.dp, modifier: Modifier = Modifier) {
 
         HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.5f))
 
-        if (shown.isEmpty()) {
+        if (threads.isEmpty()) {
+            val icon = Icons.AutoMirrored.Filled.Chat
             CenteredPlaceholder {
+                AccentIcon(icon, MaterialTheme.colorScheme.primary, size = 56.dp, iconSize = 28.dp)
+                Spacer(modifier = Modifier.height(12.dp))
                 Text(
-                    text = when {
-                        all.isEmpty() && enabled -> "暂无日志\n服务连接、悬浮窗开关、禁网设置会记录在此"
-                        all.isEmpty() -> "记录已暂停\n开启「记录」后新的操作才会写入"
-                        else -> "没有匹配的日志"
+                    text = if (all.isEmpty()) {
+                        "暂无消息\n在主页开启「消息监听」后,QQ / 微信 的通知会记录在此"
+                    } else {
+                        "没有匹配的会话"
                     },
                     style = MaterialTheme.typography.bodySmall,
                     color = MaterialTheme.colorScheme.onSurfaceVariant,
@@ -633,89 +1088,380 @@ private fun LogsScreen(bottomInset: Dp = 0.dp, modifier: Modifier = Modifier) {
                 modifier = Modifier.fillMaxSize(),
                 contentPadding = PaddingValues(bottom = 16.dp + bottomInset),
             ) {
-                // 新日志在顶部:倒序渲染
-                items(shown.size, key = { shown[shown.size - 1 - it].id }) { i ->
-                    val r = shown[shown.size - 1 - i]
-                    LogConsoleRow(r) { detail = r }
+                items(threads, key = { it.id }) { thread ->
+                    ThreadCard(thread) { openThread = thread.id }
                 }
             }
         }
     }
-
-    // 详情弹窗:完整内容 + 复制
-    detail?.let { r ->
-        AlertDialog(
-            onDismissRequest = { detail = null },
-            title = { Text("${r.level.label}  ${r.source.label}") },
-            text = {
-                Text(
-                    text = "${AppLog.formatTime(r.at)}  ${r.message}",
-                    style = MaterialTheme.typography.bodySmall,
-                    fontFamily = FontFamily.Monospace,
-                )
-            },
-            confirmButton = {
-                TextButton(onClick = {
-                    val cm = context.getSystemService(android.content.Context.CLIPBOARD_SERVICE)
-                        as android.content.ClipboardManager
-                    cm.setPrimaryClip(
-                        android.content.ClipData.newPlainText(
-                            "log",
-                            "${AppLog.formatTime(r.at)} [${r.source.label}] ${r.message}",
-                        ),
-                    )
-                    Toast.makeText(context, "已复制", Toast.LENGTH_SHORT).show()
-                }) { Text("复制") }
-            },
-            dismissButton = {
-                TextButton(onClick = { detail = null }) { Text("关闭") }
-            },
-        )
-    }
 }
 
-/** 控制台行:等宽时间 + 级别 + 来源 + 正文,行间一条极淡分隔线 */
+/** 一个会话:同一来源 + 同一会话标题聚成一条;消息按时间正序(旧 → 新) */
+private data class MessageThread(
+    /** 会话 id:来源包名 + 会话标题 */
+    val id: String,
+    val pkg: String,
+    val title: String,
+    val messages: List<MessageRecord>,
+)
+
+/** 来源对应的强调色:QQ 主色 / 微信 次色 */
 @Composable
-private fun LogConsoleRow(record: LogRecord, onClick: () -> Unit) {
-    val accent = logLevelColor(record.level)
+private fun sourceAccent(pkg: String): Color = if (pkg == MessageSources.QQ) {
+    MaterialTheme.colorScheme.primary
+} else {
+    MaterialTheme.colorScheme.secondary
+}
+
+/**
+ * 把消息聚成会话:先按来源与关键词筛,再按「来源 + 会话标题」分组,
+ * 最后按每个会话的最新一条倒序 —— 有新消息的会话排在最前。
+ */
+private fun groupThreads(
+    records: List<MessageRecord>,
+    query: String = "",
+    sourceFilter: String? = null,
+): List<MessageThread> {
+    val matched = records.filter { m ->
+        (sourceFilter == null || m.pkg == sourceFilter) &&
+            (query.isBlank() ||
+                m.text.contains(query, true) ||
+                m.title.contains(query, true))
+    }
+    // 分组键用不可见字符连接:标题里出现分隔符也不会串会话
+    val grouped = linkedMapOf<String, MutableList<MessageRecord>>()
+    matched.forEach { m ->
+        grouped.getOrPut("${m.pkg}\u0000${m.title}") { mutableListOf() } += m
+    }
+    return grouped.map { (key, messages) ->
+        val split = key.indexOf('\u0000')
+        MessageThread(key, key.substring(0, split), key.substring(split + 1), messages)
+    }.sortedByDescending { it.messages.last().at }
+}
+
+/** 会话卡:来源应用图标 + 会话名 + 最新一条摘要 + 条数 */
+@Composable
+private fun ThreadCard(thread: MessageThread, onClick: () -> Unit) {
+    val last = thread.messages.last()
+    val accent = sourceAccent(thread.pkg)
+    // 头像用来源应用的真实图标:未命中缓存时先退回首字圈,加载完自动替换
+    val appIcon = rememberAppIcon(thread.pkg)
     Column(modifier = Modifier.fillMaxWidth()) {
         Row(
             modifier = Modifier
                 .fillMaxWidth()
                 .clickable(onClick = onClick)
-                .padding(horizontal = 16.dp, vertical = 6.dp),
-            verticalAlignment = Alignment.Top,
+                .padding(horizontal = 16.dp, vertical = 10.dp),
+            verticalAlignment = Alignment.CenterVertically,
         ) {
-            Text(
-                text = AppLog.formatTime(record.at),
-                style = MaterialTheme.typography.labelSmall,
-                fontFamily = FontFamily.Monospace,
-                color = MaterialTheme.colorScheme.onSurfaceVariant,
-            )
-            Spacer(modifier = Modifier.width(10.dp))
-            Text(
-                text = record.level.label,
-                style = MaterialTheme.typography.labelSmall,
-                fontWeight = FontWeight.SemiBold,
-                color = accent,
-            )
-            Spacer(modifier = Modifier.width(10.dp))
-            Text(
-                text = record.source.label,
-                style = MaterialTheme.typography.labelSmall,
-                color = MaterialTheme.colorScheme.onSurfaceVariant,
-            )
-            Spacer(modifier = Modifier.width(10.dp))
-            Text(
-                text = record.message,
-                style = MaterialTheme.typography.bodySmall,
-                fontFamily = FontFamily.Monospace,
-                modifier = Modifier.weight(1f),
-                maxLines = 3,
-                overflow = TextOverflow.Ellipsis,
+            if (appIcon != null) {
+                Image(
+                    bitmap = appIcon,
+                    contentDescription = MessageSources.label(thread.pkg),
+                    modifier = Modifier.size(40.dp),
+                )
+            } else {
+                // 占位:会话名首字;空标题退回人形图标
+                Box(
+                    modifier = Modifier
+                        .size(40.dp)
+                        .background(accent, CircleShape),
+                    contentAlignment = Alignment.Center,
+                ) {
+                    val initial = thread.title.take(1)
+                    if (initial.isEmpty()) {
+                        Icon(
+                            imageVector = Icons.Filled.Person,
+                            contentDescription = null,
+                            tint = Color.White,
+                            modifier = Modifier.size(22.dp),
+                        )
+                    } else {
+                        Text(
+                            text = initial,
+                            color = Color.White,
+                            fontSize = 18.sp,
+                            fontWeight = FontWeight.SemiBold,
+                        )
+                    }
+                }
+            }
+            Spacer(modifier = Modifier.width(12.dp))
+            Column(modifier = Modifier.weight(1f)) {
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    Text(
+                        text = thread.title.ifEmpty { "未知会话" },
+                        style = MaterialTheme.typography.titleSmall,
+                        maxLines = 1,
+                        overflow = TextOverflow.Ellipsis,
+                        modifier = Modifier.weight(1f, fill = false),
+                    )
+                    Spacer(modifier = Modifier.width(8.dp))
+                    Text(
+                        text = MessageStore.formatShort(last.at),
+                        style = MaterialTheme.typography.labelSmall,
+                        fontFamily = FontFamily.Monospace,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    )
+                }
+                Spacer(modifier = Modifier.height(2.dp))
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    Text(
+                        text = MessageSources.label(thread.pkg),
+                        style = MaterialTheme.typography.labelSmall,
+                        fontWeight = FontWeight.SemiBold,
+                        color = accent,
+                    )
+                    Spacer(modifier = Modifier.width(6.dp))
+                    Text(
+                        text = last.text.replace('\n', ' '),
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        maxLines = 1,
+                        overflow = TextOverflow.Ellipsis,
+                        modifier = Modifier.weight(1f),
+                    )
+                }
+            }
+            Spacer(modifier = Modifier.width(6.dp))
+            // 条数角标:只有一条时不显
+            if (thread.messages.size > 1) {
+                Box(
+                    modifier = Modifier
+                        .background(
+                            MaterialTheme.colorScheme.surfaceVariant,
+                            RoundedCornerShape(10.dp),
+                        )
+                        .padding(horizontal = 6.dp, vertical = 2.dp),
+                    contentAlignment = Alignment.Center,
+                ) {
+                    Text(
+                        text = "${thread.messages.size}",
+                        style = MaterialTheme.typography.labelSmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    )
+                }
+            }
+            Icon(
+                imageVector = Icons.AutoMirrored.Filled.KeyboardArrowRight,
+                contentDescription = null,
+                tint = MaterialTheme.colorScheme.onSurfaceVariant,
+                modifier = Modifier.size(18.dp),
             )
         }
         HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.25f))
+    }
+}
+
+/** 会话流:顶栏返回 + 会话名,下面是按天分隔的气泡,长按气泡复制 */
+@Composable
+private fun ConversationThread(
+    thread: MessageThread,
+    bottomInset: Dp,
+    onBack: () -> Unit,
+    modifier: Modifier = Modifier,
+) {
+    val context = LocalContext.current
+    val listState = rememberLazyListState()
+    // 渲染行:日期分隔条与消息混在同一列表里,type 区分
+    val rows = remember(thread.id, thread.messages) {
+        buildList<Any> {
+            thread.messages.forEachIndexed { index, m ->
+                val prev = thread.messages.getOrNull(index - 1)
+                if (prev == null || !MessageStore.isSameDay(prev.at, m.at)) {
+                    add(MessageStore.formatDay(m.at))
+                }
+                add(m)
+            }
+        }
+    }
+    // 打开与来新消息都贴到底部(最新一条在最下)
+    LaunchedEffect(thread.id, rows.size) {
+        if (rows.isNotEmpty()) listState.animateScrollToItem(rows.size - 1)
+    }
+
+    Column(modifier = modifier.fillMaxSize()) {
+        Row(
+            modifier = Modifier
+                .fillMaxWidth()
+                .padding(horizontal = 8.dp, vertical = 8.dp),
+            verticalAlignment = Alignment.CenterVertically,
+        ) {
+            IconButton(onClick = onBack) {
+                Icon(
+                    imageVector = Icons.AutoMirrored.Filled.ArrowBack,
+                    contentDescription = "返回",
+                )
+            }
+            Column(modifier = Modifier.weight(1f)) {
+                Text(
+                    text = thread.title.ifEmpty { "未知会话" },
+                    style = MaterialTheme.typography.titleMedium,
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis,
+                )
+                Text(
+                    text = "${MessageSources.label(thread.pkg)}  ${thread.messages.size} 条消息",
+                    style = MaterialTheme.typography.labelSmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
+            }
+        }
+        HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.5f))
+
+        LazyColumn(
+            state = listState,
+            modifier = Modifier.fillMaxSize(),
+            contentPadding = PaddingValues(horizontal = 12.dp, vertical = 8.dp),
+        ) {
+            items(rows.size, key = { i ->
+                val row = rows[i]
+                if (row is MessageRecord) row.id else "day-$i"
+            }) { i ->
+                when (val row = rows[i]) {
+                    is String -> DayDivider(row)
+                    is MessageRecord -> MessageBubble(row) {
+                        copyText(context, "${MessageStore.formatTime(row.at)}\n${row.text}")
+                    }
+                }
+                if (i == rows.size - 1) Spacer(modifier = Modifier.height(bottomInset + 8.dp))
+            }
+        }
+    }
+}
+
+/** 日期分隔条:小号灰字居中 */
+@Composable
+private fun DayDivider(label: String) {
+    Box(
+        modifier = Modifier
+            .fillMaxWidth()
+            .padding(vertical = 8.dp),
+        contentAlignment = Alignment.Center,
+    ) {
+        Text(
+            text = label,
+            style = MaterialTheme.typography.labelSmall,
+            color = MaterialTheme.colorScheme.onSurfaceVariant,
+        )
+    }
+}
+
+/** 消息气泡:收到的消息一律靠左,长按复制 */
+@OptIn(ExperimentalFoundationApi::class)
+@Composable
+private fun MessageBubble(record: MessageRecord, onCopy: () -> Unit) {
+    val accent = sourceAccent(record.pkg)
+    Row(
+        modifier = Modifier
+            .fillMaxWidth()
+            .padding(vertical = 3.dp),
+        horizontalArrangement = Arrangement.Start,
+    ) {
+        Column(modifier = Modifier.widthIn(max = 280.dp)) {
+            Surface(
+                shape = RoundedCornerShape(14.dp),
+                // 气泡底色用来源强调色的低透明度版本,比 surfaceVariant 更能区分来源
+                color = accent.copy(alpha = 0.14f),
+                modifier = Modifier.combinedClickable(
+                    onClick = {},
+                    onLongClick = onCopy,
+                ),
+            ) {
+                Text(
+                    text = record.text,
+                    style = MaterialTheme.typography.bodyMedium,
+                    // 气泡底色是强调色的半透明变体,不是主题 surface 色 ——
+                    // Surface 推不出对应内容色,这里显式给,避免解析成 Unspecified
+                    color = MaterialTheme.colorScheme.onSurface,
+                    modifier = Modifier.padding(horizontal = 12.dp, vertical = 8.dp),
+                )
+            }
+            Text(
+                text = MessageStore.formatClock(record.at),
+                style = MaterialTheme.typography.labelSmall,
+                fontFamily = FontFamily.Monospace,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                modifier = Modifier.padding(start = 4.dp, top = 2.dp),
+            )
+        }
+    }
+}
+
+/** 复制文本到剪贴板并提示 */
+private fun copyText(context: android.content.Context, text: String) {
+    val cm = context.getSystemService(android.content.Context.CLIPBOARD_SERVICE)
+        as android.content.ClipboardManager
+    cm.setPrimaryClip(android.content.ClipData.newPlainText("message", text))
+    Toast.makeText(context, "已复制", Toast.LENGTH_SHORT).show()
+}
+
+/**
+ * 通知使用权开关卡:开关态就是系统「通知使用权」里的勾选状态。
+ * 未开启时点按先确认再跳系统设置页;已开启时点按直接解绑(服务实例不在则退回设置页)。
+ */
+@Composable
+private fun MessageListenerCard(context: android.content.Context) {
+    var enabled by remember { mutableStateOf(MessageNotificationListener.isEnabled(context)) }
+    // 待跳系统设置的提示文案:null = 不弹窗(已授权时优先在应用内直接解绑)
+    var hint by remember { mutableStateOf<String?>(null) }
+
+    // 授权页是独立界面:从系统设置返回(ON_RESUME)时重新读一次真实状态
+    val lifecycleOwner = LocalLifecycleOwner.current
+    DisposableEffect(lifecycleOwner) {
+        val observer = LifecycleEventObserver { _, event ->
+            if (event == Lifecycle.Event.ON_RESUME) {
+                enabled = MessageNotificationListener.isEnabled(context)
+            }
+        }
+        lifecycleOwner.lifecycle.addObserver(observer)
+        onDispose { lifecycleOwner.lifecycle.removeObserver(observer) }
+    }
+
+    ToggleCard(
+        icon = Icons.Filled.NotificationsActive,
+        accent = MaterialTheme.colorScheme.primary,
+        title = "消息监听",
+        description = if (enabled) {
+            "记录 QQ / 微信 的通知栏消息"
+        } else {
+            "未开启通知使用权,点按前往系统设置"
+        },
+        checked = enabled,
+        enabled = true,
+        onToggle = {
+            when {
+                // 未授权:只能去系统设置勾选
+                !enabled -> hint = "记录 QQ / 微信 的消息,需要先在系统设置里勾选「自动化助手消息监听」。"
+                // 已授权:优先在应用内解绑;服务实例不在(系统尚未回绑)才退回设置页
+                MessageNotificationListener.disable() -> enabled = false
+                else -> hint = "消息监听已开启。如需关闭,请在系统设置里取消勾选「自动化助手消息监听」。"
+            }
+        },
+    )
+
+    // 通知使用权是系统设置项,应用无法自行授予或撤销,跳转前必须用户确认
+    hint?.let { text ->
+        AlertDialog(
+            onDismissRequest = { hint = null },
+            title = { Text("通知使用权设置") },
+            text = { Text("$text\n\n点击「继续」将跳转到通知使用权设置页。") },
+            confirmButton = {
+                TextButton(onClick = {
+                    hint = null
+                    runCatching {
+                        context.startActivity(Intent(Settings.ACTION_NOTIFICATION_LISTENER_SETTINGS))
+                    }.onFailure {
+                        Toast.makeText(context, "未找到通知使用权设置页", Toast.LENGTH_SHORT).show()
+                    }
+                }) { Text(context.getString(R.string.confirm_ok)) }
+            },
+            dismissButton = {
+                TextButton(onClick = { hint = null }) {
+                    Text(context.getString(R.string.confirm_cancel))
+                }
+            },
+        )
     }
 }
 
@@ -724,16 +1470,14 @@ private fun LogConsoleRow(record: LogRecord, onClick: () -> Unit) {
 private fun HomeScreen(
     context: android.content.Context,
     uiState: AutomationManager.State,
-    serviceBound: Boolean,
     overlayOn: Boolean,
     onOverlayToggle: () -> Unit,
     onToggleAccessibility: () -> Unit,
     bottomInset: Dp = 0.dp,
     modifier: Modifier = Modifier,
 ) {
-    // 已连接 = 设置已开 且 服务实例已绑定;待连接 = 设置已开但实例尚未绑定(中间态)
-    val serviceConnected = uiState.isAccessibilityEnabled && serviceBound
-    val servicePending = uiState.isAccessibilityEnabled && !serviceConnected
+    // 只认系统里的无障碍开关:开就是开,关就是关
+    val serviceConnected = uiState.isAccessibilityEnabled
     var recentsHidden by remember { mutableStateOf(isRecentsHidden(context)) }
 
     Column(
@@ -745,12 +1489,11 @@ private fun HomeScreen(
             .padding(bottom = 32.dp + bottomInset),
         verticalArrangement = Arrangement.spacedBy(12.dp),
     ) {
-        TitleBar(serviceConnected = serviceConnected, servicePending = servicePending)
+        TitleBar()
 
         // 中控面板:电源拨盘 + 状态文案
         ControlPanel(
             serviceConnected = serviceConnected,
-            servicePending = servicePending,
             accessibilityEnabled = uiState.isAccessibilityEnabled,
             hasSecureSetting = uiState.hasSecureSetting,
             onToggle = onToggleAccessibility,
@@ -767,6 +1510,8 @@ private fun HomeScreen(
                 enabled = uiState.isAccessibilityEnabled,
                 onToggle = onOverlayToggle,
             )
+            // 通知使用权卡:状态只认系统设置,卡片自己管跳转与解绑
+            MessageListenerCard(context = context)
             ToggleCard(
                 icon = Icons.Filled.Layers,
                 accent = MaterialTheme.colorScheme.secondary,
@@ -794,27 +1539,20 @@ private fun HomeScreen(
 @Composable
 private fun ControlPanel(
     serviceConnected: Boolean,
-    servicePending: Boolean,
     accessibilityEnabled: Boolean,
     hasSecureSetting: Boolean,
     onToggle: () -> Unit,
 ) {
-    // 已连接 = 主色;待连接 = 三级色 + 旋转光环;未开启 = 灰
-    val accent = when {
-        serviceConnected -> MaterialTheme.colorScheme.primary
-        servicePending -> MaterialTheme.colorScheme.tertiary
-        else -> MaterialTheme.colorScheme.outline
+    // 开 = 主色;关 = 灰
+    val accent = if (serviceConnected) {
+        MaterialTheme.colorScheme.primary
+    } else {
+        MaterialTheme.colorScheme.outline
     }
-    val title = when {
-        serviceConnected -> "服务运行中"
-        servicePending -> "服务待连接"
-        else -> "服务未开启"
-    }
+    val title = if (serviceConnected) "服务运行中" else "服务未开启"
     // 副文案只讲无障碍服务本身:禁网、悬浮窗各自有开关,不在这里提
     val subtitle = when {
-        serviceConnected -> "无障碍服务已连接"
-        servicePending -> "无障碍服务连接中…"
-        accessibilityEnabled -> "无障碍已开启,等待连接"
+        serviceConnected -> "无障碍服务已开启"
         hasSecureSetting -> "点击开启无障碍服务"
         else -> "缺「写入安全设置」权限"
     }
@@ -836,7 +1574,6 @@ private fun ControlPanel(
         ) {
             PowerStateIndicator(
                 connected = serviceConnected,
-                pending = servicePending,
                 accent = accent,
             )
             Column(modifier = Modifier.weight(1f)) {
@@ -860,11 +1597,10 @@ private fun ControlPanel(
     }
 }
 
-/** 电源状态指示:光晕(已连接)+ 状态环(待连接时旋转)+ 中央电源图标 */
+/** 电源状态指示:光晕(已开启)+ 状态环 + 中央电源图标 */
 @Composable
 private fun PowerStateIndicator(
     connected: Boolean,
-    pending: Boolean,
     accent: Color,
 ) {
     val size = 56.dp
@@ -881,7 +1617,7 @@ private fun PowerStateIndicator(
                     ),
             )
         }
-        // 状态环:已连接满环;待连接再叠一个旋转的不确定进度环;未开启为空环
+        // 状态环:已开启满环;未开启为空环
         CircularProgressIndicator(
             progress = { if (connected) 1f else 0f },
             modifier = Modifier.size(size),
@@ -889,14 +1625,6 @@ private fun PowerStateIndicator(
             trackColor = MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.4f),
             strokeWidth = 3.dp,
         )
-        if (pending) {
-            CircularProgressIndicator(
-                modifier = Modifier.size(size),
-                color = accent,
-                trackColor = Color.Transparent,
-                strokeWidth = 3.dp,
-            )
-        }
         Box(
             modifier = Modifier
                 .size(40.dp)
@@ -1667,7 +2395,7 @@ private fun queryNetworkBlockedBatch(pkgs: List<String>): Map<String, Boolean> {
 
 /** 顶部标题 */
 @Composable
-private fun TitleBar(serviceConnected: Boolean = false, servicePending: Boolean = false) {
+private fun TitleBar() {
     Row(
         verticalAlignment = Alignment.CenterVertically,
         modifier = Modifier.fillMaxWidth(),

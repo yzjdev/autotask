@@ -18,3 +18,7 @@ local.properties
 .m3inspect/
 screenshots/
 *.deb
+
+# 本地设计稿 / 临时文件
+tmp/
+img/

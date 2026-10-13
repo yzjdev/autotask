@@ -3,6 +3,15 @@
     <string name="app_name">自动化助手</string>
     <string name="accessibility_service_label">自动化助手无障碍服务</string>
     <string name="accessibility_service_description">用于读取界面控件、定位按钮并模拟点击,以便自动执行任务。</string>
+    <!-- 无障碍设置列表里的副标题(API 26+) -->
+    <string name="accessibility_service_summary">读取界面控件、定位按钮并模拟点击</string>
+    <!-- 设置页里的 HTML 说明(API 34+ 读取,旧平台忽略) -->
+    <string name="accessibility_service_html_description">本服务用于<b>读取界面控件</b>、<b>定位按钮</b>并<b>模拟点击</b>,以便按你配置的规则自动执行任务;不联网上传任何界面内容。</string>
+    <!-- 服务详细介绍(较新平台在设置页展开显示,旧平台忽略) -->
+    <string name="accessibility_service_intro">开启后,本服务会读取当前窗口的控件信息,并在你为某个应用开启自动化规则时,按规则模拟点击/滑动;关闭服务后立即停止读取。</string>
+
+    <!-- 系统「通知使用权」列表里显示的通知监听服务名 -->
+    <string name="message_listener_label">自动化助手消息监听</string>
 
     <!-- 写入安全设置权限已授权 -->
     <string name="status_secure_granted">已授权,可读写无障碍开关。</string>

@@ -43,6 +43,7 @@
     <application
         android:name=".AutoTaskApplication"
         android:allowBackup="true"
+        android:enableOnBackInvokedCallback="true"
         android:icon="@mipmap/ic_launcher"
         android:roundIcon="@mipmap/ic_launcher_round"
         android:label="@string/app_name"
@@ -103,6 +104,23 @@
             <meta-data
                 android:name="android.accessibilityservice"
                 android:resource="@xml/accessibility_service_config" />
+        </service>
+
+        <!--
+            通知栏消息监听:只读取 QQ / 微信 的通知(包名见 MessageSources)。
+            注册不需要任何权限,但必须由用户在系统「通知使用权」里勾选才会被绑定,
+            入口是主页「消息监听」开关(跳 ACTION_NOTIFICATION_LISTENER_SETTINGS)。
+            BIND_NOTIFICATION_LISTENER_SERVICE 是签名级权限,只有系统能绑定。
+        -->
+        <service
+            android:name=".notify.MessageNotificationListener"
+            android:enabled="true"
+            android:exported="true"
+            android:label="@string/message_listener_label"
+            android:permission="android.permission.BIND_NOTIFICATION_LISTENER_SERVICE">
+            <intent-filter>
+                <action android:name="android.service.notification.NotificationListenerService" />
+            </intent-filter>
         </service>
 
     </application>

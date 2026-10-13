@@ -1,0 +1,11 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <!--
+        深色主题:系统深色模式下生效。Compose 侧由 isSystemInDarkTheme() 切换配色,
+        窗口主题若不跟随,启动/边到边时会先闪一帧浅色底(Android 12+ 的启动画面
+        也取自 windowBackground)。
+    -->
+    <style name="Theme.AutoTask" parent="android:Theme.Material.NoActionBar">
+        <item name="android:windowBackground">@color/window_background</item>
+    </style>
+</resources>

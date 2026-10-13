@@ -1,4 +1,10 @@
 <?xml version="1.0" encoding="utf-8"?>
 <resources>
-    <style name="Theme.AutoTask" parent="android:Theme.Material.Light.NoActionBar" />
+    <!--
+        浅色主题:窗口背景与 Compose 浅色主题的 background 对齐,
+        避免启动画面与边到边留白处出现系统默认底色。
+    -->
+    <style name="Theme.AutoTask" parent="android:Theme.Material.Light.NoActionBar">
+        <item name="android:windowBackground">@color/window_background</item>
+    </style>
 </resources>

@@ -147,10 +147,6 @@ open class AutoTaskAccessibilityService : AccessibilityService() {
         pixelView = null
     }
 
-    override fun onCreate() {
-        super.onCreate()
-    }
-
     override fun onServiceConnected() {
         super.onServiceConnected()
         sInstance = this
@@ -231,15 +227,30 @@ open class AutoTaskAccessibilityService : AccessibilityService() {
 
     // ---- 事件 ----
 
+    private val accessibilityEventListeners = CopyOnWriteArrayList<(Int, String?) -> Unit>()
+
+    /**
+     * 订阅全部无障碍事件。
+     *
+     * 只把事件类型与来源包名传出去 —— [AccessibilityEvent] 用完会被系统回收,
+     * 交到调用方手里就是无效对象。
+     */
+    fun addAccessibilityEventListener(listener: (eventType: Int, packageName: String?) -> Unit) {
+        accessibilityEventListeners.add(listener)
+    }
+
+    fun removeAccessibilityEventListener(listener: (eventType: Int, packageName: String?) -> Unit) {
+        accessibilityEventListeners.remove(listener)
+    }
+
     override fun onAccessibilityEvent(event: AccessibilityEvent?) {
         if (event == null) return
+
         val packageName = event.packageName?.toString()
 
         when (event.eventType) {
             AccessibilityEvent.TYPE_WINDOW_STATE_CHANGED -> {
                 val className = event.className?.toString() ?: ""
-                // 调试悬浮窗标题跟随前台窗口切换
-                notifyWindowChanged()
                 // 真实 Activity 才记录并回填:非真实 Activity(Dialog/输入法等)沿用
                 // 该应用最近一次有效 Activity 名,保证悬浮窗标题不因窗口类名失效
                 if (packageName != null && isActivityClassName(className) && isRealActivity(packageName, className)) {
@@ -247,9 +258,19 @@ open class AutoTaskAccessibilityService : AccessibilityService() {
                     lastActivity = cn
                     recordValidActivity(cn)
                 }
+                // 调试悬浮窗标题跟随前台窗口切换
+                notifyWindowChanged()
             }
 
             else -> Unit
+        }
+
+        // 订阅方(规则引擎等)只拿事件类型与包名
+        if (accessibilityEventListeners.isNotEmpty()) {
+            val type = event.eventType
+            for (listener in accessibilityEventListeners) {
+                runCatching { listener(type, packageName) }
+            }
         }
     }
 
@@ -381,7 +402,13 @@ open class AutoTaskAccessibilityService : AccessibilityService() {
         windowListeners -= listener
     }
 
+    /** 最近一次窗口状态变化时间:动作之间靠它判断页面是否已安静下来 */
+    @Volatile
+    var lastWindowChangeAt: Long = 0L
+        private set
+
     private fun notifyWindowChanged() {
+        lastWindowChangeAt = System.currentTimeMillis()
         windowListeners.toList().forEach { it() }
     }
 
@@ -456,6 +483,46 @@ open class AutoTaskAccessibilityService : AccessibilityService() {
     fun readableText(node: AccessibilityNodeInfo): String? =
         node.contentDescription?.toString()?.takeIf { it.isNotBlank() }
             ?: node.text?.toString()?.takeIf { it.isNotBlank() }
+
+    // ---- 内置规则接口 ----
+
+    /**
+     * 当前窗口是否存在满足 [predicate] 的节点。
+     *
+     * 刻意不复用 [findFirst]/[traverseNodes]:那条路径命中后会把节点直接 recycle(),
+     * 且 [processedNodes] 去重集合只在服务连接时清空 —— 规则要反复检测,复用它会第二次就查不到东西。
+     * 这里独立遍历,命中节点不回收(用完即弃)。
+     */
+    fun hasNode(predicate: (AccessibilityNodeInfo) -> Boolean): Boolean {
+        var found = false
+        walkNodes { node ->
+            if (predicate(node)) {
+                found = true
+                true
+            } else {
+                false
+            }
+        }
+        return found
+    }
+
+    /** 干净的深度优先遍历:独立于 findFirst 的去重与回收,onNode 返回 true 停止 */
+    private fun walkNodes(onNode: (AccessibilityNodeInfo) -> Boolean) {
+        val root = rootInActiveWindow ?: return
+        walkNode(root, onNode)
+    }
+
+    private fun walkNode(
+        node: AccessibilityNodeInfo,
+        onNode: (AccessibilityNodeInfo) -> Boolean,
+    ): Boolean {
+        if (onNode(node)) return true
+        for (i in 0 until node.childCount) {
+            val child = node.getChild(i) ?: continue
+            if (walkNode(child, onNode)) return true
+        }
+        return false
+    }
 
     // ---- 动作 ----
 

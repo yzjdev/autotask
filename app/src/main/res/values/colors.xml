@@ -1,4 +1,6 @@
 <?xml version="1.0" encoding="utf-8"?>
 <resources>
     <color name="ic_launcher_background">#0F172A</color>
+    <!-- 窗口背景:与 Compose 主题的 background 一致,避免启动与边到边时闪色 -->
+    <color name="window_background">#FFFBFE</color>
 </resources>

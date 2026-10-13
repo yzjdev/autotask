@@ -129,6 +129,9 @@ class OverlayDebugWindow(private val service: AccessibilityService) {
     private var headerTitle = ""
     private var headerActivity = ""
 
+    /** 头部当前窗口的包名:标题里那份是「应用名(包名)」,长按要复制的是纯包名 */
+    private var headerPkg = ""
+
     /** 头部是否锁定在窗口列表点选的窗口上:锁定时不再跟随焦点激活窗口刷新 */
     private var headerPinned = false
 
@@ -172,6 +175,7 @@ class OverlayDebugWindow(private val service: AccessibilityService) {
     private fun applyHeader(name: String, pkg: String, activity: String) {
         val title = if (pkg.isEmpty()) name else "$name($pkg)"
         headerTitle = title
+        headerPkg = pkg
         headerActivity = activity
         titleView?.text = title
         // 没有 Activity 就整行收起,不写占位文字
@@ -491,6 +495,10 @@ class OverlayDebugWindow(private val service: AccessibilityService) {
                     }
                     return true
                 }
+                // 长按树行:生成该节点的 jsoup 选择器并写入剪贴板
+                override fun onLongPress(e: MotionEvent) {
+                    if (treeTapIndex >= 0) copySelectorOf(treeTapIndex)
+                }
             })
     }
 
@@ -644,6 +652,18 @@ class OverlayDebugWindow(private val service: AccessibilityService) {
             typeface = android.graphics.Typeface.DEFAULT_BOLD
             maxLines = 1
             ellipsize = android.text.TextUtils.TruncateAt.END
+            // 长按复制包名(标题是「应用名(包名)」,复制的是纯包名)
+            setOnLongClickListener {
+                val pkg = headerPkg
+                if (pkg.isEmpty()) {
+                    false
+                } else {
+                    copyToClipboard(pkg)
+                    it.animate().alpha(0.4f).setDuration(80)
+                        .withEndAction { it.animate().alpha(1f).setDuration(120) }
+                    true
+                }
+            }
         }
         titleView = title
 
@@ -797,8 +817,8 @@ class OverlayDebugWindow(private val service: AccessibilityService) {
 
     /**
      * 信息卡片整卡拖动:监听器挂在卡片根布局上。
-     * 子 View(关闭钮、方向键、节点树把手、表格滚动区)会消费自己的 DOWN,
-     * 事件不会冒泡到这里,因此拖动只在标题栏/分隔线/空白处生效,不干扰内部交互。
+     * 子 View(标题、关闭钮、方向键、节点树把手、表格滚动区)会消费自己的 DOWN,
+     * 事件不会冒泡到这里,因此拖动只在头部行内边距/分隔线/空白处生效,不干扰内部交互。
      */
     @SuppressLint("ClickableViewAccessibility")
     private fun attachCardDrag(card: LinearLayout) {
@@ -959,6 +979,12 @@ class OverlayDebugWindow(private val service: AccessibilityService) {
                 cornerRadius = dp(4).toFloat()
                 setColor(0x33F59E0B.toInt())
             }
+            // 长按:生成 jsoup 选择器并写入剪贴板(属性行的长按复制属性值,不冲突)
+            isLongClickable = true
+            setOnLongClickListener {
+                copySelectorOf(index)
+                true
+            }
         })
         top.addView(TextView(service).apply {
             text = s.info.take(60)
@@ -1028,7 +1054,7 @@ class OverlayDebugWindow(private val service: AccessibilityService) {
         val groups = listOf(
             "内容" to listOf("类名", "viewId", "vid", "文本", "描述"),
             "定位" to listOf("边界"),
-            "状态" to listOf("可点击", "可滚动", "可勾选"),
+            "状态" to listOf("可点击", "可滚动", "可勾选", "可见性"),
             "布局" to listOf("子节点"),
         )
         for ((title, keys) in groups) {
@@ -1093,6 +1119,18 @@ class OverlayDebugWindow(private val service: AccessibilityService) {
         val cm = service.getSystemService(android.content.ClipboardManager::class.java)
         cm.setPrimaryClip(android.content.ClipData.newPlainText("node", text))
         android.widget.Toast.makeText(service, text, android.widget.Toast.LENGTH_SHORT).show()
+    }
+
+    /** 长按节点(树行/信息卡片):生成 jsoup 选择器并写入剪贴板 */
+    private fun copySelectorOf(index: Int) {
+        val node = snapshots.getOrNull(index)?.node ?: return
+        val selector = JsrSelectorBuilder.build(node)
+        if (selector.isNullOrBlank()) {
+            android.widget.Toast.makeText(service, "该节点已失效,重新抓取后再试",
+                android.widget.Toast.LENGTH_SHORT).show()
+            return
+        }
+        copyToClipboard(selector)
     }
 
     /** 上:父节点 */

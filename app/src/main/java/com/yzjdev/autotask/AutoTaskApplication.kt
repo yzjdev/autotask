@@ -3,6 +3,7 @@ package com.yzjdev.autotask
 import android.app.Application
 import com.yzjdev.autotask.automation.log.AppLog
 import com.yzjdev.autotask.crash.CrashReporter
+import com.yzjdev.autotask.notify.MessageStore
 
 /**
  * 应用入口。
@@ -22,5 +23,7 @@ class AutoTaskApplication : Application() {
         // 日志层尽早初始化:回填上次落盘的日志,并裁剪超限文件
         AppLog.init(this)
         AppLog.trimIfNeeded()
+        // 消息层同样尽早初始化:通知监听服务随时可能被系统绑定并回调
+        MessageStore.init(this)
     }
 }
